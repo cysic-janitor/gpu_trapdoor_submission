@@ -31,8 +31,8 @@ where
     ) -> Point<P> {
         // Turn scalar into bits
         let raw_scalar = *self
-            .variables
-            .get(&curve_var)
+            .variables_vec
+            .get(curve_var.0)
             // We can unwrap safely here since it should be impossible to obtain
             // a `Variable` without first linking it inside of the
             // HashMap from which we are calling the `get()` now. Therefore, if

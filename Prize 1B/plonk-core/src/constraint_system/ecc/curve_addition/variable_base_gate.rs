@@ -6,7 +6,7 @@
 
 //! Variable-base Curve Addition Gate
 
-use crate::constraint_system::{ecc::Point, StandardComposer};
+use crate::constraint_system::{ecc::Point, variable, StandardComposer};
 use ark_ec::models::{
     twisted_edwards_extended::GroupAffine as TEGroupAffine, TEModelParameters,
 };
@@ -37,10 +37,19 @@ where
         let y_2 = point_b.y;
 
         // Compute the resulting point
-        let x_1_scalar = self.variables.get(&x_1).unwrap();
-        let y_1_scalar = self.variables.get(&y_1).unwrap();
-        let x_2_scalar = self.variables.get(&x_2).unwrap();
-        let y_2_scalar = self.variables.get(&y_2).unwrap();
+        let (x_1_scalar, y_1_scalar, x_2_scalar, y_2_scalar) = {
+            // let variables = &self.variables;
+            let variables = &self.variables_vec;
+
+            (
+                variables.get(x_1.0).unwrap().clone(),
+                variables.get(y_1.0).unwrap().clone(),
+                variables.get(x_2.0).unwrap().clone(),
+                variables.get(y_2.0).unwrap().clone(),
+            )
+        };
+        let (x_1_scalar, y_1_scalar, x_2_scalar, y_2_scalar) =
+            (&x_1_scalar, &y_1_scalar, &x_2_scalar, &y_2_scalar);
 
         let p1 = TEGroupAffine::<P>::new(*x_1_scalar, *y_1_scalar);
         let p2 = TEGroupAffine::<P>::new(*x_2_scalar, *y_2_scalar);
@@ -162,8 +171,8 @@ mod test {
 
         // Compute the inverse
         let inv_x_denom = composer
-            .variables
-            .get(&x_denominator)
+            .variables_vec
+            .get(x_denominator.0)
             .unwrap()
             .inverse()
             .unwrap();
@@ -185,8 +194,8 @@ mod test {
         });
 
         let inv_y_denom = composer
-            .variables
-            .get(&y_denominator)
+            .variables_vec
+            .get(y_denominator.0)
             .unwrap()
             .inverse()
             .unwrap();

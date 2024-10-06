@@ -6,7 +6,12 @@ use plonk_hashing::poseidon::{
 };
 
 use crate::{MerkleTree, HEIGHT};
+use ark_serialize::*;
+use ark_std::sync::Arc;
+use ark_std::sync::Mutex;
+use plonk_core::permutation::Permutation;
 
+#[derive(CanonicalDeserialize, CanonicalSerialize)]
 pub struct MerkleTreeCircuit {
     pub param: PoseidonConstants<Fr>,
     pub merkle_tree: MerkleTree<NativeSpecRef<Fr>>,
@@ -20,6 +25,16 @@ impl Circuit<Fr, EdwardsParameters> for MerkleTreeCircuit {
         composer: &mut StandardComposer<Fr, EdwardsParameters>,
     ) -> Result<(), Error> {
         self.merkle_tree.gen_constraints(composer, &self.param);
+        Ok(())
+    }
+
+    fn gadget_with_permutation(
+        &mut self,
+        composer: &mut StandardComposer<Fr, EdwardsParameters>,
+        with_permutation: bool,
+    ) -> Result<(), Error> {
+        self.merkle_tree
+            .gen_constraints_4(composer, &self.param, with_permutation);
         Ok(())
     }
 

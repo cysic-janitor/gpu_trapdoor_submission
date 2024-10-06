@@ -1,8 +1,8 @@
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at http://mozilla.org/MPL/2.0/.
-//
-// Copyright (c) DUSK NETWORK. All rights reserved.
+// // This Source Code Form is subject to the terms of the Mozilla Public
+// // License, v. 2.0. If a copy of the MPL was not distributed with this
+// // file, You can obtain one at http://mozilla.org/MPL/2.0/.
+// //
+// // Copyright (c) DUSK NETWORK. All rights reserved.
 
 use super::StandardComposer;
 use crate::{
@@ -32,68 +32,67 @@ pub(crate) fn dummy_gadget<F, P>(
     }
 }
 
-/// Takes a generic gadget function with no auxillary input and tests whether it
-/// passes an end-to-end test.
-#[allow(dead_code)]
-pub(crate) fn gadget_tester<F, P, PC>(
-    gadget: fn(&mut StandardComposer<F, P>),
-    n: usize,
-) -> Result<crate::proof_system::Proof<F, PC>, Error>
-where
-    F: PrimeField,
-    P: TEModelParameters<BaseField = F>,
-    PC: HomomorphicCommitment<F>,
-{
-    // Common View
-    let universal_params =
-        PC::setup(2 * n, None, &mut OsRng).map_err(to_pc_error::<F, PC>)?;
+// #[allow(dead_code)]
+// pub(crate) fn gadget_tester<F, P, PC, G>(
+//     gadget: fn(&mut StandardComposer<F, P>),
+//     n: usize,
+// ) -> Result<crate::proof_system::Proof<F, PC>, Error>
+// where
+//     F: PrimeField + ark_ec::AffineCurve,
+//     P: TEModelParameters<BaseField = F>,
+//     PC: HomomorphicCommitment<F>,
+// {
+//     // Common View
+//     let universal_params =
+//         PC::setup(2 * n, None, &mut OsRng).map_err(to_pc_error::<F, PC>)?;
 
-    // Provers View
-    let (proof, public_inputs) = {
-        // Create a prover struct
-        let mut prover = Prover::<F, P, PC>::new(b"demo");
+//     // Provers View
+//     let (proof, public_inputs) = {
+//         // Create a prover struct
+//         let mut prover = Prover::<F, P, PC>::new(b"demo");
 
-        // Additionally key the transcript
-        prover.key_transcript(b"key", b"additional seed information");
+//         // Additionally key the transcript
+//         prover.key_transcript(b"key", b"additional seed information");
 
-        // Add gadgets
-        gadget(prover.mut_cs());
+//         // Add gadgets
+//         gadget(prover.mut_cs());
 
-        // Commit Key
-        let (ck, _) =
-            PC::trim(&universal_params, prover.circuit_bound(), 0, None)
-                .map_err(to_pc_error::<F, PC>)?;
+//         // Commit Key
+//         let (ck, _) =
+//             PC::trim(&universal_params, prover.circuit_bound(), 0, None)
+//                 .map_err(to_pc_error::<F, PC>)?;
 
-        // Preprocess circuit
-        prover.preprocess(&ck)?;
+//         // Preprocess circuit
+//         prover.preprocess(&ck)?;
 
-        // Once the prove method is called, the public inputs are cleared
-        // So pre-fetch these before calling Prove
-        let public_inputs = prover.cs.get_pi().clone();
+//         // Once the prove method is called, the public inputs are cleared
+//         // So pre-fetch these before calling Prove
+//         let public_inputs = prover.cs.get_pi().clone();
 
-        // Compute Proof
-        (prover.prove(&ck)?, public_inputs)
-    };
-    // Verifiers view
-    //
-    // Create a Verifier object
-    let mut verifier = Verifier::new(b"demo");
 
-    // Additionally key the transcript
-    verifier.key_transcript(b"key", b"additional seed information");
+//         // Compute Proof
+//         // (prover.prove::<F>(&ck, None)?, public_inputs)
+//     };
+//     // Verifiers view
+//     //
+//     // Create a Verifier object
+//     let mut verifier = Verifier::new(b"demo");
 
-    // Add gadgets
-    gadget(verifier.mut_cs());
+//     // Additionally key the transcript
+//     verifier.key_transcript(b"key", b"additional seed information");
 
-    // Compute Commit and Verifier Key
-    let (ck, vk) =
-        PC::trim(&universal_params, verifier.circuit_bound(), 0, None)
-            .map_err(to_pc_error::<F, PC>)?;
+//     // Add gadgets
+//     gadget(verifier.mut_cs());
 
-    // Preprocess circuit
-    verifier.preprocess(&ck)?;
+//     // Compute Commit and Verifier Key
+//     let (ck, vk) =
+//         PC::trim(&universal_params, verifier.circuit_bound(), 0, None)
+//             .map_err(to_pc_error::<F, PC>)?;
 
-    // Verify proof
-    verifier.verify(&proof, &vk, &public_inputs)?;
-    Ok(proof)
-}
+//     // Preprocess circuit
+//     verifier.preprocess(&ck)?;
+
+//     // Verify proof
+//     verifier.verify(&proof, &vk, &public_inputs)?;
+//     Ok(proof)
+// }

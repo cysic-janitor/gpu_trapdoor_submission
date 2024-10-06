@@ -20,8 +20,10 @@ use crate::{
     HEIGHT,
 };
 
+use ark_serialize::*;
+
 /// A merkle tree. Associated type: poseidon spec with a hard coded width = 3
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default,CanonicalDeserialize, CanonicalSerialize)]
 pub struct MerkleTree<S: PoseidonRefSpec<(), 3>> {
     /// stores the non-leaf nodes in level order. The first element is the root
     /// node. The ith nodes (starting at 1st) children are at indices

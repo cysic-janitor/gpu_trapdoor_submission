@@ -12,6 +12,9 @@ mod preprocess;
 mod quotient_poly;
 mod widget;
 
+
+pub mod gpu_prover;
+
 pub mod pi;
 pub mod proof;
 pub mod prover;
@@ -21,3 +24,4 @@ pub use proof::*;
 pub use prover::Prover;
 pub use verifier::Verifier;
 pub use widget::*;
+// pub use gpu_prover;

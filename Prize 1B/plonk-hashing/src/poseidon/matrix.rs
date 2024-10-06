@@ -1,18 +1,36 @@
 //! acknowledgement: adapted from FileCoin Project: https://github.com/filecoin-project/neptune/blob/master/src/matrix.rs
 
 use ark_ff::PrimeField;
+use ark_serialize::*;
 use core::ops::{Index, IndexMut};
 
-#[derive(Clone, Eq, PartialEq, Debug)]
-pub struct Matrix<T: Clone>(pub Vec<Vec<T>>);
+#[derive(
+    Clone, Eq, PartialEq, Debug, CanonicalDeserialize, CanonicalSerialize,
+)]
+pub struct Matrix<
+    T: Clone
+        + ark_serialize::CanonicalDeserialize
+        + ark_serialize::CanonicalSerialize,
+>(pub Vec<Vec<T>>);
 
-impl<T: Clone> From<Vec<Vec<T>>> for Matrix<T> {
+impl<
+        T: Clone
+            + ark_serialize::CanonicalDeserialize
+            + ark_serialize::CanonicalSerialize
+            + ark_serialize::CanonicalSerialize,
+    > From<Vec<Vec<T>>> for Matrix<T>
+{
     fn from(v: Vec<Vec<T>>) -> Self {
         Matrix(v)
     }
 }
 
-impl<T: Clone> Matrix<T> {
+impl<
+        T: Clone
+            + ark_serialize::CanonicalDeserialize
+            + ark_serialize::CanonicalSerialize,
+    > Matrix<T>
+{
     pub fn num_rows(&self) -> usize {
         self.0.len()
     }
@@ -57,7 +75,12 @@ impl<T: Clone> Matrix<T> {
     }
 }
 
-impl<T: Clone> Index<usize> for Matrix<T> {
+impl<
+        T: Clone
+            + ark_serialize::CanonicalDeserialize
+            + ark_serialize::CanonicalSerialize,
+    > Index<usize> for Matrix<T>
+{
     type Output = Vec<T>;
 
     fn index(&self, index: usize) -> &Self::Output {
@@ -65,14 +88,24 @@ impl<T: Clone> Index<usize> for Matrix<T> {
     }
 }
 
-impl<T: Clone> IndexMut<usize> for Matrix<T> {
+impl<
+        T: Clone
+            + ark_serialize::CanonicalDeserialize
+            + ark_serialize::CanonicalSerialize,
+    > IndexMut<usize> for Matrix<T>
+{
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         &mut self.0[index]
     }
 }
 
 // from iterator rows
-impl<F: Clone> FromIterator<Vec<F>> for Matrix<F> {
+impl<
+        F: Clone
+            + ark_serialize::CanonicalDeserialize
+            + ark_serialize::CanonicalSerialize,
+    > FromIterator<Vec<F>> for Matrix<F>
+{
     fn from_iter<T: IntoIterator<Item = Vec<F>>>(iter: T) -> Self {
         let rows = iter.into_iter().collect::<Vec<_>>();
         Self(rows)

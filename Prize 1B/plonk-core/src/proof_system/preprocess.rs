@@ -14,12 +14,14 @@ use crate::{
     lookup::PreprocessedLookupTable,
     proof_system::{widget, ProverKey},
 };
+use ark_bls12_381::G1Affine;
 use ark_ec::TEModelParameters;
 use ark_ff::{FftField, PrimeField};
 use ark_poly::{
     polynomial::univariate::DensePolynomial, EvaluationDomain, Evaluations,
     GeneralEvaluationDomain, UVPolynomial,
 };
+use ec_gpu_common::MSMContext;
 use core::marker::PhantomData;
 use merlin::Transcript;
 
@@ -262,6 +264,25 @@ where
         // Compute 8n evaluations for X^n -1
         let v_h_coset_8n =
             compute_vanishing_poly_over_coset(domain_8n, domain.size() as u64);
+        let v_h_coset_8n_inv = (0..domain_8n.size()).map(|i| {
+            *(&v_h_coset_8n[i].inverse().unwrap())
+        }).collect::<Vec<F>>();
+        let v_h_coset_8n_inv = Evaluations::from_vec_and_domain(v_h_coset_8n_inv, domain_8n);
+
+        let mut x_evals = vec![F::zero(); domain.size()];
+        x_evals[0] = F::one();
+        domain.ifft_in_place(&mut x_evals);
+        let l1_poly = DensePolynomial::from_coefficients_vec(x_evals);
+        let l1_poly_coset_8n = domain_8n.coset_fft(&l1_poly);
+        let mut coset_powers_8n = vec![F::one(); domain_8n.size()];
+        GeneralEvaluationDomain::distribute_powers(&mut coset_powers_8n, F::multiplicative_generator());
+        let mut coset_powers_8n_ifft = vec![F::one(); domain_8n.size()];
+        GeneralEvaluationDomain::distribute_powers(&mut coset_powers_8n_ifft, F::multiplicative_generator().inverse().unwrap());
+
+        let left_sigma_eval_n = domain.fft(&selectors.left_sigma);
+        let right_sigma_eval_n = domain.fft(&selectors.right_sigma);
+        let out_sigma_eval_n = domain.fft(&selectors.out_sigma);
+        let fourth_sigma_eval_n = domain.fft(&selectors.fourth_sigma);
 
         Ok(ProverKey::from_polynomials_and_evals(
             domain.size(),
@@ -286,6 +307,15 @@ where
             (selectors.fourth_sigma, fourth_sigma_eval_8n),
             linear_eval_8n,
             v_h_coset_8n,
+            v_h_coset_8n_inv,
+            l1_poly,
+            l1_poly_coset_8n,
+            coset_powers_8n,
+            coset_powers_8n_ifft,
+            left_sigma_eval_n,
+            right_sigma_eval_n,
+            out_sigma_eval_n,
+            fourth_sigma_eval_n,
             preprocessed_table.t[0].0.clone(),
             preprocessed_table.t[1].0.clone(),
             preprocessed_table.t[2].0.clone(),
@@ -408,6 +438,8 @@ where
             fourth_sigma_poly,
         ) = self.perm.compute_sigma_polynomials(self.n, &domain);
 
+        let msm_context:Option<&mut MSMContext::<'static, 'static, G1Affine>> = None;
+
         let (commitments, _) = PC::commit(
             commit_key,
             [
@@ -433,6 +465,7 @@ where
             ]
             .iter(),
             None,
+            msm_context,
         )
         .map_err(to_pc_error::<F, PC>)?;
 

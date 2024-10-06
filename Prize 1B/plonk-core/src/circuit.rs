@@ -6,6 +6,8 @@
 
 //! Tools & traits for PLONK circuits
 
+use crate::permutation::Permutation;
+use crate::permutation::MSM_KERN;
 use crate::{
     commitment::HomomorphicCommitment,
     error::{to_pc_error, Error},
@@ -14,9 +16,14 @@ use crate::{
         pi::PublicInputs, Proof, Prover, ProverKey, Verifier, VerifierKey,
     },
 };
-use ark_ec::models::TEModelParameters;
+use ark_ec::{models::TEModelParameters, AffineCurve};
 use ark_ff::PrimeField;
 use ark_serialize::*;
+use ark_std::sync::Arc;
+use ark_std::sync::Mutex;
+use ec_gpu_common::Fr as GpuFr;
+use ec_gpu_common::GpuPolyContainer;
+use ec_gpu_common::MSMContext;
 
 /// Collection of structs/objects that the Verifier will use in order to
 /// de/serialize data needed for Circuit proof verification.
@@ -219,6 +226,13 @@ where
         composer: &mut StandardComposer<F, P>,
     ) -> Result<(), Error>;
 
+    ///
+    fn gadget_with_permutation(
+        &mut self,
+        composer: &mut StandardComposer<F, P>,
+        permutation: bool,
+    ) -> Result<(), Error>;
+
     /// Compiles the circuit by using a function that returns a `Result`
     /// with the [`ProverKey`], [`VerifierKey`] and a vector of the intended
     /// positions for public inputs and the circuit size.
@@ -226,6 +240,7 @@ where
     fn compile<PC>(
         &mut self,
         u_params: &PC::UniversalParams,
+        perm: &mut Permutation,
     ) -> Result<(ProverKey<F>, (VerifierKey<F, PC>, Vec<usize>)), Error>
     where
         F: PrimeField,
@@ -235,10 +250,15 @@ where
         let circuit_size = self.padded_circuit_size();
         let (ck, _) = PC::trim(u_params, circuit_size, 0, None)
             .map_err(to_pc_error::<F, PC>)?;
+        // println!("compile ck[0]:{:?}", ck);
 
         //Generate & save `ProverKey` with some random values.
-        let mut prover = Prover::<F, P, PC>::new(b"CircuitCompilation");
+        let kern = &MSM_KERN;
+        let mut prover =
+            Prover::<F, P, PC>::new(b"CircuitCompilation", &kern.core.context);
         self.gadget(prover.mut_cs())?;
+        // println!("prover w_l len :{:?}", prover.cs.w_l.len());
+        *perm = prover.mut_cs().perm.clone();
         prover.preprocess(&ck)?;
 
         // Generate & save `VerifierKey` with some random values.
@@ -258,32 +278,131 @@ where
         ))
     }
 
+    ///
+    // #[allow(clippy::type_complexity)]
+    // fn compile_2<PC>(
+    //     &mut self,
+    //     u_params: &PC::UniversalParams,
+    //     tree_height: u32,
+    // ) -> Result<(ProverKey<F>, (VerifierKey<F, PC>, Vec<usize>)), Error>
+    // where
+    //     F: PrimeField,
+    //     PC: HomomorphicCommitment<F>,
+    // {
+    //     // Setup PublicParams
+    //     let circuit_size = self.padded_circuit_size();
+    //     let (ck, _) = PC::trim(u_params, circuit_size, 0, None)
+    //         .map_err(to_pc_error::<F, PC>)?;
+
+    //     let kern = &MSM_KERN;
+
+    //     //Generate & save `ProverKey` with some random values.
+    //     let mut prover = Prover::<F, P, PC>::new_2(
+    //         b"CircuitCompilation",
+    //         &kern.core.context,
+    //         tree_height,
+    //         None,
+    //         None,
+    //         None,
+    //         None,
+    //     );
+    //     // println!("prover 2:{:?}", prover.cs);
+    //     let start = std::time::Instant::now();
+    //     self.gadget_2(prover.mut_cs())?;
+
+    //     println!("");
+    //     println!("");
+
+    //     prover.preprocess(&ck)?;
+
+    //     // Generate & save `VerifierKey` with some random values.
+    //     let mut verifier = Verifier::new(b"CircuitCompilation");
+    //     self.gadget(verifier.mut_cs())?;
+    //     verifier.preprocess(&ck)?;
+    //     Ok((
+    //         prover
+    //             .prover_key
+    //             .expect("Unexpected error. Missing ProverKey in
+    // compilation"),         (
+    //             verifier.verifier_key.expect(
+    //                 "Unexpected error. Missing VerifierKey in compilation",
+    //             ),
+    //             verifier.cs.intended_pi_pos,
+    //         ),
+    //     ))
+    // }
     /// Generates a proof using the provided [`ProverKey`] and
     /// [`ark_poly_commit::PCUniversalParams`]. Returns a
     /// [`crate::proof_system::Proof`] and the [`PublicInputs`].
-    fn gen_proof<PC>(
+    fn gen_proof_with_permutation<'a, 'b, PC, G>(
         &mut self,
+        prover: &mut Prover<F, P, PC>,
+        ck: &PC::CommitterKey,
+        prover_key: &ProverKey<F>,
         u_params: &PC::UniversalParams,
-        prover_key: ProverKey<F>,
+        // prover_key: ProverKey<F>,
         transcript_init: &'static [u8],
+        msm_context: Option<&mut MSMContext<'a, 'b, G>>,
+        gpu_container: &mut GpuPolyContainer<GpuFr>,
+        permutation: &Permutation,
     ) -> Result<(Proof<F, PC>, PublicInputs<F>), Error>
     where
         F: PrimeField,
         P: TEModelParameters<BaseField = F>,
         PC: HomomorphicCommitment<F>,
+        G: AffineCurve,
     {
-        let circuit_size = self.padded_circuit_size();
-        let (ck, _) = PC::trim(u_params, circuit_size, 0, None)
-            .map_err(to_pc_error::<F, PC>)?;
+        // let circuit_size = self.padded_circuit_size();
+        // let (ck, _) = PC::trim(u_params, circuit_size, 0, None)
+        //     .map_err(to_pc_error::<F, PC>)?;
         // New Prover instance
-        let mut prover = Prover::new(transcript_init);
+        // let mut prover = Prover::new(transcript_init);
         // Fill witnesses for Prover
-        self.gadget(prover.mut_cs())?;
+        // self.gadget(prover.mut_cs())?;
         // Add ProverKey to Prover
-        prover.prover_key = Some(prover_key);
+        // prover.prover_key = Some(prover_key);
         let pi = prover.cs.get_pi().clone();
 
-        Ok((prover.prove(&ck)?, pi))
+        let proof = prover.prove_with_permutation(
+            ck,
+            prover_key,
+            msm_context,
+            gpu_container,
+            permutation,
+        )?;
+        Ok((proof, pi))
+    }
+
+    fn gen_proof<'a, 'b, PC, G>(
+        &mut self,
+        prover: &mut Prover<F, P, PC>,
+        ck: &PC::CommitterKey,
+        prover_key: &ProverKey<F>,
+        u_params: &PC::UniversalParams,
+        // prover_key: ProverKey<F>,
+        transcript_init: &'static [u8],
+        msm_context: Option<&mut MSMContext<'a, 'b, G>>,
+        gpu_container: &mut GpuPolyContainer<GpuFr>,
+    ) -> Result<(Proof<F, PC>, PublicInputs<F>), Error>
+    where
+        F: PrimeField,
+        P: TEModelParameters<BaseField = F>,
+        PC: HomomorphicCommitment<F>,
+        G: AffineCurve,
+    {
+        // let circuit_size = self.padded_circuit_size();
+        // let (ck, _) = PC::trim(u_params, circuit_size, 0, None)
+        //     .map_err(to_pc_error::<F, PC>)?;
+        // New Prover instance
+        // let mut prover = Prover::new(transcript_init);
+        // Fill witnesses for Prover
+        // self.gadget(prover.mut_cs())?;
+        // Add ProverKey to Prover
+        // prover.prover_key = Some(prover_key);
+        let pi = prover.cs.get_pi().clone();
+
+        let proof = prover.prove(ck, prover_key, msm_context, gpu_container)?;
+        Ok((proof, pi))
     }
 
     /// Returns the Circuit size padded to the next power of two.

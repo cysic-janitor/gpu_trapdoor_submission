@@ -334,6 +334,15 @@ where
     /// in their evaluation phase and divide by the quotient
     /// polynomial without having to perform IFFT
     pub(crate) v_h_coset_8n: Evaluations<F>,
+    pub(crate) v_h_coset_8n_inv: Evaluations<F>,
+    pub(crate) l1_poly_n: DensePolynomial<F>,
+    pub(crate) l1_poly_coset_8n: Vec<F>,
+    pub(crate) coset_powers_8n: Vec<F>,
+    pub(crate) coset_powers_8n_ifft: Vec<F>,
+    pub(crate) left_sigma_eval_n: Vec<F>,
+    pub(crate) right_sigma_eval_n: Vec<F>,
+    pub(crate) out_sigma_eval_n: Vec<F>,
+    pub(crate) fourth_sigma_eval_n: Vec<F>,
 }
 
 impl<F> ProverKey<F>
@@ -342,6 +351,22 @@ where
 {
     pub(crate) fn v_h_coset_8n(&self) -> &Evaluations<F> {
         &self.v_h_coset_8n
+    }
+
+    pub(crate) fn v_h_coset_8n_inv(&self) -> &Evaluations<F> {
+        &self.v_h_coset_8n_inv
+    }
+
+    pub(crate) fn l1_poly_coset_8n(&self) -> &Vec<F> {
+        &self.l1_poly_coset_8n
+    }
+
+    pub(crate) fn coset_powers_8n(&self) -> &Vec<F> {
+        &self.coset_powers_8n
+    }
+
+    pub(crate) fn coset_powers_8n_ifft(&self) -> &Vec<F> {
+        &self.coset_powers_8n_ifft
     }
 
     /// Constructs a [`ProverKey`] from the widget ProverKey's that are
@@ -370,6 +395,15 @@ where
         fourth_sigma: (DensePolynomial<F>, Evaluations<F>),
         linear_evaluations: Evaluations<F>,
         v_h_coset_8n: Evaluations<F>,
+        v_h_coset_8n_inv: Evaluations<F>,
+        l1_poly_n: DensePolynomial<F>,
+        l1_poly_coset_8n: Vec<F>,
+        coset_powers_8n: Vec<F>,
+        coset_powers_8n_ifft: Vec<F>,
+        left_sigma_eval_n: Vec<F>,
+        right_sigma_eval_n: Vec<F>,
+        out_sigma_eval_n: Vec<F>,
+        fourth_sigma_eval_n: Vec<F>,
         table_1: MultiSet<F>,
         table_2: MultiSet<F>,
         table_3: MultiSet<F>,
@@ -408,6 +442,15 @@ where
                 linear_evaluations,
             },
             v_h_coset_8n,
+            v_h_coset_8n_inv,
+            l1_poly_n,
+            l1_poly_coset_8n,
+            coset_powers_8n,
+            coset_powers_8n_ifft,
+            left_sigma_eval_n,
+            right_sigma_eval_n,
+            out_sigma_eval_n,
+            fourth_sigma_eval_n,
         }
     }
 }

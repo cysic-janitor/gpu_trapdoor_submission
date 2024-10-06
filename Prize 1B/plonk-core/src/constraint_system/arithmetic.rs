@@ -6,7 +6,10 @@
 
 //! Simple Arithmetic Gates
 
-use crate::constraint_system::{StandardComposer, Variable};
+use crate::{
+    constraint_system::{StandardComposer, Variable},
+    permutation::Permutation,
+};
 use ark_ec::TEModelParameters;
 use ark_ff::PrimeField;
 
@@ -15,13 +18,13 @@ pub struct ArithmeticGate<F>
 where
     F: PrimeField,
 {
-    pub(crate) witness: Option<(Variable, Variable, Option<Variable>)>,
-    pub(crate) fan_in_3: Option<(F, Variable)>,
-    pub(crate) mul_selector: F,
-    pub(crate) add_selectors: (F, F),
-    pub(crate) out_selector: F,
-    pub(crate) const_selector: F,
-    pub(crate) pi: Option<F>,
+    pub witness: Option<(Variable, Variable, Option<Variable>)>,
+    pub fan_in_3: Option<(F, Variable)>,
+    pub mul_selector: F,
+    pub add_selectors: (F, F),
+    pub out_selector: F,
+    pub const_selector: F,
+    pub pi: Option<F>,
 }
 
 impl<F> Default for ArithmeticGate<F>
@@ -104,10 +107,12 @@ where
     where
         Fn: FnOnce(&mut ArithmeticGate<F>) -> &mut ArithmeticGate<F>,
     {
+        // let start = std::time::Instant::now();
         let gate = {
             let mut gate = ArithmeticGate::<F>::new();
             func(&mut gate).build()
         };
+        // println!("arithmetic_gate_1 0 spent:{:?}", start.elapsed());
 
         if gate.witness.is_none() {
             panic!("Missing left and right wire witnesses")
@@ -146,20 +151,33 @@ where
             });
         };
 
+        // println!("arithmetic_gate_1 1 spent:{:?}", start.elapsed());
+
         let c = gate_witness.2.unwrap_or_else(|| {
+            // let var0 = self.variables.lock().unwrap()[&gate_witness.0];
+            let var0 = self.variables_vec.as_slice()[gate_witness.0 .0];
+
+            // let var1 = self.variables.lock().unwrap()[&gate_witness.1];
+            let var1 = self.variables_vec.as_slice()[gate_witness.1 .0];
+
+            // let var_w4 = self.variables.lock().unwrap()[&w4];
+            let var_w4 = self.variables_vec.as_slice()[w4.0];
+
+            // println!("gate_witness.2");
             self.add_input(
-                ((gate.mul_selector
-                    * (self.variables[&gate_witness.0]
-                        * self.variables[&gate_witness.1]))
-                    + gate.add_selectors.0 * self.variables[&gate_witness.0]
-                    + gate.add_selectors.1 * self.variables[&gate_witness.1]
+                ((gate.mul_selector * (var0 * var1))
+                    + gate.add_selectors.0 * var0
+                    + gate.add_selectors.1 * var1
                     + gate.const_selector
-                    + q4 * self.variables[&w4]
+                    + q4 * var_w4
                     + gate.pi.unwrap_or_default())
                     * (-gate.out_selector),
             )
         });
         self.w_o.push(c);
+
+        // println!("arithmetic_gate_1 2 spent:{:?}", start.elapsed());
+
         self.perm.add_variables_to_map(
             gate_witness.0,
             gate_witness.1,
@@ -169,6 +187,244 @@ where
         );
         self.n += 1;
 
+        c
+    }
+
+    /// Function used to generate any arithmetic gate with fan-in-2 or fan-in-3.
+    pub fn arithmetic_gate_2<Fn>(
+        &mut self,
+        func: Fn,
+        gate_index: &mut usize,
+        variable_index: &mut usize,
+        // perm: &mut Permutation,
+        reuse_perm: bool,
+    ) -> Variable
+    where
+        Fn: FnOnce(&mut ArithmeticGate<F>) -> &mut ArithmeticGate<F>,
+    {
+        // let start = std::time::Instant::now();
+        let gate = {
+            let mut gate = ArithmeticGate::<F>::new();
+            func(&mut gate).build()
+        };
+        // println!("arithmetic_gate_2 0 spent:{:?}", start.elapsed());
+
+        if gate.witness.is_none() {
+            panic!("Missing left and right wire witnesses")
+        }
+        let (q4, w4) = gate.fan_in_3.unwrap_or((F::zero(), self.zero_var));
+        // self.w_4.push(w4);
+        self.w_4[*gate_index] = w4;
+        // self.q_4.push(q4);
+        self.q_4[*gate_index] = q4;
+
+        let gate_witness = gate.witness.unwrap();
+        // self.w_l.push(gate_witness.0);
+        self.w_l[*gate_index] = gate_witness.0;
+        // self.w_r.push(gate_witness.1);
+        self.w_r[*gate_index] = gate_witness.1;
+        // self.q_l.push(gate.add_selectors.0);
+        self.q_l[*gate_index] = gate.add_selectors.0;
+        // self.q_r.push(gate.add_selectors.1);
+        self.q_r[*gate_index] = gate.add_selectors.1;
+
+        // Add selector vectors
+        // self.q_m.push(gate.mul_selector);
+        self.q_m[*gate_index] = gate.mul_selector;
+        // self.q_o.push(gate.out_selector);
+        self.q_o[*gate_index] = gate.out_selector;
+        // self.q_c.push(gate.const_selector);
+        self.q_c[*gate_index] = gate.const_selector;
+
+        // add high degree selectors
+        // self.q_hl.push(F::zero());
+        self.q_hl[*gate_index] = F::zero();
+        // self.q_hr.push(F::zero());
+        self.q_hr[*gate_index] = F::zero();
+        // self.q_h4.push(F::zero());
+        self.q_h4[*gate_index] = F::zero();
+
+        // self.q_arith.push(F::one());
+        self.q_arith[*gate_index] = F::one();
+        // self.q_range.push(F::zero());
+        self.q_range[*gate_index] = F::zero();
+
+        // self.q_logic.push(F::zero());
+        self.q_logic[*gate_index] = F::zero();
+        // self.q_fixed_group_add.push(F::zero());
+        self.q_fixed_group_add[*gate_index] = F::zero();
+        // self.q_variable_group_add.push(F::zero());
+        self.q_variable_group_add[*gate_index] = F::zero();
+        // self.q_lookup.push(F::zero());
+        self.q_lookup[*gate_index] = F::zero();
+
+        if let Some(pi) = gate.pi {
+            self.add_pi(*gate_index, &pi).unwrap_or_else(|_| {
+                panic!("Could not insert PI {:?} at {}", pi, *gate_index)
+            });
+        };
+
+        // println!("arithmetic_gate_2 1 spent:{:?}", start.elapsed());
+        let c = gate_witness.2.unwrap_or_else(|| {
+            let (var0, var1, var_w4) = {
+                let v = &self.variables_vec;
+                // let var0 = v[&gate_witness.0];
+                // let var1 = v[&gate_witness.1];
+                // let var_w4 = v[&w4];
+                let var0 = v.as_slice()[gate_witness.0 .0];
+                let var1 = v.as_slice()[gate_witness.1 .0];
+                let var_w4 = v.as_slice()[w4.0];
+                (var0, var1, var_w4)
+            };
+
+            self.add_input_2(
+                ((gate.mul_selector * (var0 * var1))
+                    + gate.add_selectors.0 * var0
+                    + gate.add_selectors.1 * var1
+                    + gate.const_selector
+                    + q4 * var_w4
+                    + gate.pi.unwrap_or_default())
+                    * (-gate.out_selector),
+                variable_index,
+                // Some(perm),
+                reuse_perm,
+            )
+        });
+
+        // self.w_o.push(c);
+        self.w_o[*gate_index] = c;
+
+        // if !reuse_perm {
+        //     perm.add_variables_to_map(
+        //         gate_witness.0,
+        //         gate_witness.1,
+        //         c,
+        //         w4,
+        //         *gate_index,
+        //     );
+        // }
+
+        *gate_index += 1;
+        self.n = *gate_index;
+        c
+    }
+
+    pub fn arithmetic_gate_end<Fn>(
+        &mut self,
+        func: Fn,
+        gate_index: &mut usize,
+        variable_index: &mut usize,
+        reuse_perm: bool,
+    ) -> Variable
+    where
+        Fn: FnOnce(&mut ArithmeticGate<F>) -> &mut ArithmeticGate<F>,
+    {
+        // let start = std::time::Instant::now();
+        let gate = {
+            let mut gate = ArithmeticGate::<F>::new();
+            func(&mut gate).build()
+        };
+        // println!("arithmetic_gate_2 0 spent:{:?}", start.elapsed());
+
+        if gate.witness.is_none() {
+            panic!("Missing left and right wire witnesses")
+        }
+        let (q4, w4) = gate.fan_in_3.unwrap_or((F::zero(), self.zero_var));
+        // self.w_4.push(w4);
+        self.w_4[*gate_index] = w4;
+        // self.q_4.push(q4);
+        self.q_4[*gate_index] = q4;
+
+        let gate_witness = gate.witness.unwrap();
+        // self.w_l.push(gate_witness.0);
+        self.w_l[*gate_index] = gate_witness.0;
+        // self.w_r.push(gate_witness.1);
+        self.w_r[*gate_index] = gate_witness.1;
+        // self.q_l.push(gate.add_selectors.0);
+        self.q_l[*gate_index] = gate.add_selectors.0;
+        // self.q_r.push(gate.add_selectors.1);
+        self.q_r[*gate_index] = gate.add_selectors.1;
+
+        // Add selector vectors
+        // self.q_m.push(gate.mul_selector);
+        self.q_m[*gate_index] = gate.mul_selector;
+        // self.q_o.push(gate.out_selector);
+        self.q_o[*gate_index] = gate.out_selector;
+        // self.q_c.push(gate.const_selector);
+        self.q_c[*gate_index] = gate.const_selector;
+
+        // add high degree selectors
+        // self.q_hl.push(F::zero());
+        self.q_hl[*gate_index] = F::zero();
+        // self.q_hr.push(F::zero());
+        self.q_hr[*gate_index] = F::zero();
+        // self.q_h4.push(F::zero());
+        self.q_h4[*gate_index] = F::zero();
+
+        // self.q_arith.push(F::one());
+        self.q_arith[*gate_index] = F::one();
+        // self.q_range.push(F::zero());
+        self.q_range[*gate_index] = F::zero();
+
+        // self.q_logic.push(F::zero());
+        self.q_logic[*gate_index] = F::zero();
+        // self.q_fixed_group_add.push(F::zero());
+        self.q_fixed_group_add[*gate_index] = F::zero();
+        // self.q_variable_group_add.push(F::zero());
+        self.q_variable_group_add[*gate_index] = F::zero();
+        // self.q_lookup.push(F::zero());
+        self.q_lookup[*gate_index] = F::zero();
+
+        if let Some(pi) = gate.pi {
+            self.add_pi(*gate_index, &pi).unwrap_or_else(|_| {
+                panic!("Could not insert PI {:?} at {}", pi, *gate_index)
+            });
+        };
+
+        // println!("arithmetic_gate_2 1 spent:{:?}", start.elapsed());
+
+        // println!("thread-id:{:?}, gate_witness.0:{}, variable_index:{}",
+        // thread_id, gate_witness.0, *variable_index);
+        let c = gate_witness.2.unwrap_or_else(|| {
+            let (var0, var1, var_w4) = {
+                let v = &self.variables_vec;
+                let var0 = v.as_slice()[gate_witness.0 .0];
+                let var1 = v.as_slice()[gate_witness.1 .0];
+                let var_w4 = v.as_slice()[w4.0];
+                (var0, var1, var_w4)
+            };
+
+            self.add_input_end(
+                ((gate.mul_selector * (var0 * var1))
+                    + gate.add_selectors.0 * var0
+                    + gate.add_selectors.1 * var1
+                    + gate.const_selector
+                    + q4 * var_w4
+                    + gate.pi.unwrap_or_default())
+                    * (-gate.out_selector),
+                variable_index,
+                None,
+                reuse_perm,
+            )
+        });
+        // println!("arithmetic_gate_2 2 spent:{:?}", start.elapsed());
+
+        // self.w_o.push(c);
+        self.w_o[*gate_index] = c;
+
+        // let s = std::time::Instant::now();
+        // if !reuse_perm {
+        //     self.perm.add_variables_to_map(
+        //         gate_witness.0,
+        //         gate_witness.1,
+        //         c,
+        //         w4,
+        //         *gate_index,
+        //     );
+        // }
+
+        *gate_index += 1;
+        self.n = *gate_index;
         c
     }
 }

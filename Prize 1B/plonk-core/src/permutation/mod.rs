@@ -8,8 +8,6 @@
 
 pub(crate) mod constants;
 
-use crate::constraint_system::{Variable, WireData};
-use ark_ff::FftField;
 use ark_poly::{
     domain::{EvaluationDomain, GeneralEvaluationDomain},
     univariate::DensePolynomial,
@@ -19,12 +17,500 @@ use constants::*;
 use hashbrown::HashMap;
 use itertools::izip;
 
+use crate::{
+    constraint_system::{Variable, WireData},
+    util::EvaluationDomainExt,
+};
+use ark_bls12_381::G1Affine;
+use ark_ec::AffineCurve;
+use ark_ff::{BigInteger256, FftField};
+
+use ec_gpu_common::DeviceMemory;
+use ec_gpu_common::{
+    log2_floor, product_argument_test, wires_to_single_gate, Fr as GpuFr,
+    GPUSourceCore, GpuPoly, GpuPolyContainer, MSMContext, MsmPrecalcContainer,
+    MultiexpKernel, PolyKernel, GPU_CUDA_CORES,
+};
+
+use std::{any::type_name, sync::Mutex};
+// use ref_thread_local::RefThreadLocal;
+
+lazy_static::lazy_static! {
+    pub static ref GPU_KERN_IDX: usize = {
+        std::env::var("GPU_IDX")
+            .and_then(|v| match v.parse() {
+                Ok(val) => Ok(val),
+                Err(_) => {
+                    println!("Invalid env GPU_IDX! Defaulting to 0...");
+                    Ok(0)
+                }
+            })
+            .unwrap_or(0)
+    };
+
+    pub static ref PRECALC_CONTAINER:MsmPrecalcContainer = {
+        MsmPrecalcContainer::create_with_core(&GPU_CUDA_CORES[*GPU_KERN_IDX], true).unwrap()
+    };
+
+    pub static ref  GPU_POLY_KERNEL: PolyKernel<'static, GpuFr> = {
+        PolyKernel::<GpuFr>::create_with_core(&GPU_CUDA_CORES[*GPU_KERN_IDX]).unwrap()
+    };
+
+    pub static ref GPU_POLY_CONTAINER: Mutex<GpuPolyContainer<GpuFr>> = {
+        Mutex::new(GpuPolyContainer::<GpuFr>::create().unwrap())
+    };
+
+    pub static ref MSM_KERN : MultiexpKernel<'static, 'static, G1Affine> = {
+        MultiexpKernel::<G1Affine>::create(*GPU_KERN_IDX, &PRECALC_CONTAINER)
+            .unwrap()
+    };
+}
+
+// ref_thread_local::ref_thread_local! {
+//     /// thread
+//     // pub static managed GPU_POLY_KERNEL: PolyKernel<'static, GpuFr> = {
+//     //
+// PolyKernel::<GpuFr>::create_with_core(&GPU_CUDA_CORES[*GPU_KERN_IDX]).
+// unwrap()     // };
+
+//     /// thread
+//     pub static managed GPU_POLY_CONTAINER: GpuPolyContainer<GpuFr> = {
+//         GpuPolyContainer::<GpuFr>::create().unwrap()
+//     };
+// }
+
+fn print_type_of<T>(_: &T) {
+    println!(" type: {:#?}", std::any::type_name::<T>())
+}
+
+pub fn gpu_ifft_without_back_orig_data<F: FftField>(
+    kern: &PolyKernel<GpuFr>,
+    gpu_container: &mut GpuPolyContainer<GpuFr>,
+    scalar: &Vec<F>,
+    name: &str,
+    n: usize,
+    size_inv: F,
+) {
+    let lgn = log2_floor(n);
+    let gpu_poly = gpu_container.find(&kern, name);
+    let mut gpu_poly = match gpu_poly {
+        Ok(poly) => poly,
+        Err(_) => {
+            let mut ret = gpu_container.ask_for(&kern, n).unwrap();
+            ret
+        }
+    };
+
+    let orig_name = name.to_owned() + "_orig";
+    let orig_name = orig_name.as_str();
+    let gpu_poly_orig = gpu_container.find(&kern, orig_name);
+    let mut gpu_poly_orig = match gpu_poly_orig {
+        Ok(poly) => poly,
+        Err(_) => {
+            let mut ret = gpu_container.ask_for(&kern, n).unwrap();
+            ret
+        }
+    };
+
+    let mut tmp_buf = gpu_container
+        .find(&kern, &format!("domain_{n}_tmp_buf"))
+        .unwrap();
+    let ipq_buf = gpu_container
+        .find(&kern, &format!("domain_{n}_pq_ifft"))
+        .unwrap();
+    let iomegas_buf = gpu_container
+        .find(&kern, &format!("domain_{n}_omegas_ifft"))
+        .unwrap();
+
+    gpu_poly.fill_with_fe(&F::zero()).unwrap();
+    tmp_buf.fill_with_fe(&F::zero()).unwrap();
+    gpu_poly.read_from(scalar).unwrap();
+
+    gpu_poly_orig.copy_from_gpu(&gpu_poly).unwrap();
+    //gpu_poly.ifft_full(&size_inv).unwrap();
+    gpu_poly
+        .ifft(&mut tmp_buf, &ipq_buf, &iomegas_buf, &size_inv, lgn)
+        .unwrap();
+
+    gpu_container.save(name, gpu_poly).unwrap();
+    gpu_container
+        .save(&format!("domain_{n}_pq_ifft"), ipq_buf)
+        .unwrap();
+    gpu_container
+        .save(&format!("domain_{n}_omegas_ifft"), iomegas_buf)
+        .unwrap();
+    gpu_container
+        .save(&format!("domain_{n}_tmp_buf"), tmp_buf)
+        .unwrap();
+
+    gpu_container.save(orig_name, gpu_poly_orig).unwrap();
+}
+
+pub fn gpu_ifft_without_back<F: FftField>(
+    kern: &PolyKernel<GpuFr>,
+    gpu_container: &mut GpuPolyContainer<GpuFr>,
+    scalar: &Vec<F>,
+    name: &str,
+    n: usize,
+    size_inv: F,
+) {
+    let lgn = log2_floor(n);
+    let gpu_poly = gpu_container.find(&kern, name);
+    let mut gpu_poly = match gpu_poly {
+        Ok(poly) => poly,
+        Err(_) => {
+            let mut ret = gpu_container.ask_for(&kern, n).unwrap();
+            ret
+        }
+    };
+    let mut tmp_buf = gpu_container
+        .find(&kern, &format!("domain_{n}_tmp_buf"))
+        .unwrap();
+    let ipq_buf = gpu_container
+        .find(&kern, &format!("domain_{n}_pq_ifft"))
+        .unwrap();
+    let iomegas_buf = gpu_container
+        .find(&kern, &format!("domain_{n}_omegas_ifft"))
+        .unwrap();
+
+    gpu_poly.fill_with_fe(&F::zero()).unwrap();
+    tmp_buf.fill_with_fe(&F::zero()).unwrap();
+    gpu_poly.read_from(scalar).unwrap();
+    //gpu_poly.ifft_full(&size_inv).unwrap();
+    gpu_poly
+        .ifft(&mut tmp_buf, &ipq_buf, &iomegas_buf, &size_inv, lgn)
+        .unwrap();
+
+    gpu_container.save(name, gpu_poly).unwrap();
+    gpu_container
+        .save(&format!("domain_{n}_pq_ifft"), ipq_buf)
+        .unwrap();
+    gpu_container
+        .save(&format!("domain_{n}_omegas_ifft"), iomegas_buf)
+        .unwrap();
+    gpu_container
+        .save(&format!("domain_{n}_tmp_buf"), tmp_buf)
+        .unwrap();
+}
+
+pub fn gpu_ifft_without_back_gscalars<F: FftField>(
+    kern: &PolyKernel<GpuFr>,
+    gpu_container: &mut GpuPolyContainer<GpuFr>,
+    gpu_poly: &mut GpuPoly<GpuFr>,
+    name: &str,
+    n: usize,
+    size_inv: F,
+) {
+    let lgn = log2_floor(n);
+    let mut tmp_buf = gpu_container
+        .find(&kern, &format!("domain_{n}_tmp_buf"))
+        .unwrap();
+    let ipq_buf = gpu_container
+        .find(&kern, &format!("domain_{n}_pq_ifft"))
+        .unwrap();
+    let iomegas_buf = gpu_container
+        .find(&kern, &format!("domain_{n}_omegas_ifft"))
+        .unwrap();
+
+    tmp_buf.fill_with_fe(&F::zero()).unwrap();
+    gpu_poly
+        .ifft(&mut tmp_buf, &ipq_buf, &iomegas_buf, &size_inv, lgn)
+        .unwrap();
+
+    gpu_container
+        .save(&format!("domain_{n}_pq_ifft"), ipq_buf)
+        .unwrap();
+    gpu_container
+        .save(&format!("domain_{n}_omegas_ifft"), iomegas_buf)
+        .unwrap();
+    gpu_container
+        .save(&format!("domain_{n}_tmp_buf"), tmp_buf)
+        .unwrap();
+}
+
+pub fn gpu_ifft_without_back_noread<F: FftField>(
+    kern: &PolyKernel<GpuFr>,
+    gpu_container: &mut GpuPolyContainer<GpuFr>,
+    name: &str,
+    n: usize,
+    size_inv: F,
+) {
+    let lgn = log2_floor(n);
+    let mut gpu_poly = gpu_container.find(&kern, name).unwrap();
+
+    let mut tmp_buf = gpu_container
+        .find(&kern, &format!("domain_{n}_tmp_buf"))
+        .unwrap();
+    let ipq_buf = gpu_container
+        .find(&kern, &format!("domain_{n}_pq_ifft"))
+        .unwrap();
+    let iomegas_buf = gpu_container
+        .find(&kern, &format!("domain_{n}_omegas_ifft"))
+        .unwrap();
+
+    tmp_buf.fill_with_fe(&F::zero()).unwrap();
+    //gpu_poly.ifft_full(&size_inv).unwrap();
+    gpu_poly
+        .ifft(&mut tmp_buf, &ipq_buf, &iomegas_buf, &size_inv, lgn)
+        .unwrap();
+
+    gpu_container.save(name, gpu_poly).unwrap();
+    gpu_container
+        .save(&format!("domain_{n}_pq_ifft"), ipq_buf)
+        .unwrap();
+    gpu_container
+        .save(&format!("domain_{n}_omegas_ifft"), iomegas_buf)
+        .unwrap();
+    gpu_container
+        .save(&format!("domain_{n}_tmp_buf"), tmp_buf)
+        .unwrap();
+}
+
+/// gpu_ifft
+// pub fn gpu_fft<F: FftField>(
+//     kern: &PolyKernel<GpuFr>,
+//     gpu_container: &mut GpuPolyContainer<GpuFr>,
+//     scalar: &Vec<F>,
+//     name: &str,
+//     n: usize,
+//     _omega: F,
+// ) -> DensePolynomial<F> {
+//     let start = std::time::Instant::now();
+
+//     let lgn = log2_floor(n);
+//     let gpu_poly = gpu_container.find(&kern, name);
+//     let mut gpu_poly = match gpu_poly {
+//         Ok(poly) => poly,
+//         Err(_) => {
+//             let mut ret = gpu_container.ask_for(&kern, n).unwrap();
+//             ret.fill_with_zero().unwrap();
+//             ret
+//         }
+//     };
+
+//     let mut tmp_buf = gpu_container
+//         .find(&kern, &format!("domain_{n}_tmp_buf"))
+//         .unwrap();
+//     let pq_buf = gpu_container
+//         .find(&kern, &format!("domain_{n}_pq"))
+//         .unwrap();
+//     let omegas_buf = gpu_container
+//         .find(&kern, &format!("domain_{n}_omegas"))
+//         .unwrap();
+
+//     tmp_buf.fill_with_fe(&F::zero()).unwrap();
+//     gpu_poly.read_from(scalar).unwrap();
+//     //gpu_poly.fft_full(&omega).unwrap();
+//     gpu_poly
+//         .fft(&mut tmp_buf, &pq_buf, &omegas_buf, lgn)
+//         .unwrap();
+
+//     let mut gpu_fft_out = vec![F::zero(); n];
+
+//     gpu_poly.write_to(&mut gpu_fft_out).unwrap();
+
+//     let gpu_fft_out = DensePolynomial::from_coefficients_vec(gpu_fft_out);
+
+//     gpu_container.save(name, gpu_poly).unwrap();
+//     gpu_container
+//         .save(&format!("domain_{n}_pq"), pq_buf)
+//         .unwrap();
+//     gpu_container
+//         .save(&format!("domain_{n}_omegas"), omegas_buf)
+//         .unwrap();
+//     gpu_container
+//         .save(&format!("domain_{n}_tmp_buf"), tmp_buf)
+//         .unwrap();
+//     // println!("fft cpy spent:{:?}", start.elapsed());
+
+//     gpu_fft_out
+// }
+
+// gpu coset fft
+pub fn gpu_coset_fft<F: FftField>(
+    kern: &PolyKernel<GpuFr>,
+    gpu_container: &mut GpuPolyContainer<GpuFr>,
+    scalar: &Vec<F>,
+    name: &str,
+    n: usize,
+) {
+    let start = std::time::Instant::now();
+
+    let lgn = log2_floor(n);
+    let gpu_poly = gpu_container.find(&kern, name);
+    let mut gpu_poly = match gpu_poly {
+        Ok(poly) => poly,
+        Err(_) => {
+            let mut ret = gpu_container.ask_for(&kern, n).unwrap();
+            ret.fill_with_zero().unwrap();
+            ret
+        }
+    };
+
+    let mut tmp_buf = gpu_container
+        .find(&kern, &format!("domain_{n}_tmp_buf"))
+        .unwrap();
+    let pq_buf = gpu_container
+        .find(&kern, &format!("domain_{n}_pq"))
+        .unwrap();
+    let omegas_buf = gpu_container
+        .find(&kern, &format!("domain_{n}_omegas"))
+        .unwrap();
+    let coset_powers_buf = gpu_container
+        .find(&kern, &format!("domain_{n}_coset_powers"))
+        .unwrap();
+
+    tmp_buf.fill_with_fe(&F::zero()).unwrap();
+    gpu_poly.read_from(scalar).unwrap();
+    //gpu_poly.fft_full(&omega).unwrap();
+    gpu_poly.mul_assign(&coset_powers_buf).unwrap();
+    gpu_poly
+        .fft(&mut tmp_buf, &pq_buf, &omegas_buf, lgn)
+        .unwrap();
+
+    gpu_container.save(name, gpu_poly).unwrap();
+    gpu_container
+        .save(&format!("domain_{n}_coset_powers"), coset_powers_buf)
+        .unwrap();
+    gpu_container
+        .save(&format!("domain_{n}_pq"), pq_buf)
+        .unwrap();
+    gpu_container
+        .save(&format!("domain_{n}_omegas"), omegas_buf)
+        .unwrap();
+    gpu_container
+        .save(&format!("domain_{n}_tmp_buf"), tmp_buf)
+        .unwrap();
+
+    // println!("coset fft spent:{:?}", start.elapsed());
+}
+
+// gpu coset fft
+pub fn gpu_coset_fft_gscalar(
+    kern: &PolyKernel<GpuFr>,
+    gpu_container: &mut GpuPolyContainer<GpuFr>,
+    scalar: &GpuPoly<GpuFr>,
+    name: &str,
+    n: usize,
+) {
+    let start = std::time::Instant::now();
+
+    let lgn = log2_floor(n);
+    let gpu_poly = gpu_container.find(&kern, name);
+    let mut gpu_poly = match gpu_poly {
+        Ok(poly) => poly,
+        Err(_) => {
+            let mut ret = gpu_container.ask_for(&kern, n).unwrap();
+            ret
+        }
+    };
+
+    let mut tmp_buf = gpu_container
+        .find(&kern, &format!("domain_{n}_tmp_buf"))
+        .unwrap();
+    let pq_buf = gpu_container
+        .find(&kern, &format!("domain_{n}_pq"))
+        .unwrap();
+    let omegas_buf = gpu_container
+        .find(&kern, &format!("domain_{n}_omegas"))
+        .unwrap();
+    let coset_powers_buf = gpu_container
+        .find(&kern, &format!("domain_{n}_coset_powers"))
+        .unwrap();
+
+    tmp_buf.fill_with_zero().unwrap();
+    gpu_poly.fill_with_zero().unwrap();
+    gpu_poly.copy_from_gpu(scalar).unwrap();
+    //gpu_poly.fft_full(&omega).unwrap();
+    gpu_poly.mul_assign(&coset_powers_buf).unwrap();
+    gpu_poly
+        .fft(&mut tmp_buf, &pq_buf, &omegas_buf, lgn)
+        .unwrap();
+
+    gpu_container.save(name, gpu_poly).unwrap();
+    gpu_container
+        .save(&format!("domain_{n}_coset_powers"), coset_powers_buf)
+        .unwrap();
+    gpu_container
+        .save(&format!("domain_{n}_pq"), pq_buf)
+        .unwrap();
+    gpu_container
+        .save(&format!("domain_{n}_omegas"), omegas_buf)
+        .unwrap();
+    gpu_container
+        .save(&format!("domain_{n}_tmp_buf"), tmp_buf)
+        .unwrap();
+
+    // println!("coset fft spent:{:?}", start.elapsed());
+}
+
+// gpu coset ifft
+pub fn gpu_coset_ifft_gscalar<F: FftField>(
+    kern: &PolyKernel<GpuFr>,
+    gpu_container: &mut GpuPolyContainer<GpuFr>,
+    scalar: &GpuPoly<GpuFr>,
+    name: &str,
+    n: usize,
+    size_inv: F,
+) {
+    let start = std::time::Instant::now();
+    let lgn = log2_floor(n);
+    let gpu_poly = gpu_container.find(&kern, name);
+    let mut gpu_poly = match gpu_poly {
+        Ok(poly) => poly,
+        Err(_) => {
+            let mut ret = gpu_container.ask_for(&kern, n).unwrap();
+            ret.fill_with_zero().unwrap();
+            ret
+        }
+    };
+
+    let mut tmp_buf = gpu_container
+        .find(&kern, &format!("domain_{n}_tmp_buf"))
+        .unwrap();
+    let ipq_buf = gpu_container
+        .find(&kern, &format!("domain_{n}_pq_ifft"))
+        .unwrap();
+    let iomegas_buf = gpu_container
+        .find(&kern, &format!("domain_{n}_omegas_ifft"))
+        .unwrap();
+    let coset_powers_buf = gpu_container
+        .find(&kern, &format!("domain_{n}_coset_powers_ifft"))
+        .unwrap();
+
+    tmp_buf.fill_with_fe(&F::zero()).unwrap();
+    gpu_poly.copy_from_gpu(scalar).unwrap();
+    gpu_poly
+        .ifft(&mut tmp_buf, &ipq_buf, &iomegas_buf, &size_inv, lgn)
+        .unwrap();
+    gpu_poly.mul_assign(&coset_powers_buf).unwrap();
+
+    // let mut gpu_fft_out = vec![F::zero(); n];
+
+    // gpu_poly.write_to(&mut gpu_fft_out).unwrap();
+
+    gpu_container.save(name, gpu_poly).unwrap();
+    gpu_container
+        .save(&format!("domain_{n}_coset_powers_ifft"), coset_powers_buf)
+        .unwrap();
+    gpu_container
+        .save(&format!("domain_{n}_pq_ifft"), ipq_buf)
+        .unwrap();
+    gpu_container
+        .save(&format!("domain_{n}_omegas_ifft"), iomegas_buf)
+        .unwrap();
+    gpu_container
+        .save(&format!("domain_{n}_tmp_buf"), tmp_buf)
+        .unwrap();
+    // println!("coset i fft spent:{:?}", start.elapsed());
+}
+
 /// Permutation provides the necessary state information and functions
 /// to create the permutation polynomial. In the literature, Z(X) is the
 /// "accumulator", this is what this codebase calls the permutation polynomial.
 #[derive(derivative::Derivative)]
-#[derivative(Debug)]
-pub(crate) struct Permutation {
+#[derivative(Clone, Debug)]
+pub struct Permutation {
     /// Maps a variable to the wires that it is associated to.
     pub variable_map: HashMap<Variable, Vec<WireData>>,
 }
@@ -32,7 +518,8 @@ pub(crate) struct Permutation {
 impl Permutation {
     /// Creates a Permutation struct with an expected capacity of zero.
     pub fn new() -> Self {
-        Permutation::with_capacity(0)
+        let ret = Permutation::with_capacity(0);
+        ret
     }
 
     /// Creates a Permutation struct with an expected capacity of `n`.
@@ -49,6 +536,19 @@ impl Permutation {
         // Generate the Variable
         let var = Variable(self.variable_map.keys().len());
 
+        // Allocate space for the Variable on the variable_map
+        // Each vector is initialised with a capacity of 16.
+        // This number is a best guess estimate.
+        self.variable_map.insert(var, Vec::with_capacity(16usize));
+
+        var
+    }
+
+    pub fn new_variable_2(&mut self, gate_index: &mut usize) -> Variable {
+        // Generate the Variable
+        // let var = Variable(self.variable_map.keys().len());
+        let var = Variable(*gate_index);
+        *gate_index += 1;
         // Allocate space for the Variable on the variable_map
         // Each vector is initialised with a capacity of 16.
         // This number is a best guess estimate.
@@ -89,12 +589,48 @@ impl Permutation {
     }
 
     pub fn add_variable_to_map(&mut self, var: Variable, wire_data: WireData) {
-        assert!(self.valid_variables(&[var]));
+        // assert!(self.valid_variables(&[var]));
 
         // NOTE: Since we always allocate space for the Vec of WireData when a
         // `Variable` is added to the variable_map, this should never fail.
-        let vec_wire_data = self.variable_map.get_mut(&var).unwrap();
-        vec_wire_data.push(wire_data);
+        match self.variable_map.get_mut(&var) {
+            Some(vec_wire_data) => {
+                vec_wire_data.push(wire_data);
+            }
+            None => {
+                self.variable_map.insert(var, vec![wire_data]);
+            }
+        }
+
+        // let vec_wire_data = self.variable_map.get_mut(&var).unwrap();
+        // vec_wire_data.push(wire_data);
+        // vec_wire_data.sort();
+    }
+
+    pub fn add_wire_datas(&mut self, var: Variable, wire_datas: Vec<WireData>) {
+        // assert!(self.valid_variables(&[var]));
+
+        // NOTE: Since we always allocate space for the Vec of WireData when a
+        // `Variable` is added to the variable_map, this should never fail.
+        match self.variable_map.get_mut(&var) {
+            Some(v) => {
+                // let v = self.variable_map.get_mut(&var).unwrap();
+                v.extend_from_slice(&wire_datas.as_slice());
+            }
+            None => {
+                self.variable_map.insert(var, wire_datas);
+            }
+        }
+
+        // let vec_wire_data = self.variable_map.get_mut(&var).unwrap();
+        // vec_wire_data.push(wire_data);
+        // vec_wire_data.sort();
+    }
+
+    pub fn sort_wire(&mut self) {
+        self.variable_map
+            .iter_mut()
+            .for_each(|(_, items)| items.sort());
     }
     /// Performs shift by one permutation and computes `sigma_1`, `sigma_2` and
     /// `sigma_3`, `sigma_4` permutations from the variable maps.
@@ -649,106 +1185,230 @@ impl Permutation {
     // This can be adapted into a general product argument
     // for any number of wires, with specific formulas defined
     // in the numerator_irreducible and denominator_irreducible functions
-    pub fn compute_permutation_poly<F: FftField>(
+    pub fn compute_permutation_poly<'a, 'b, G, F>(
         &self,
         domain: &GeneralEvaluationDomain<F>,
-        wires: (&[F], &[F], &[F], &[F]),
+        gate_roots: &DeviceMemory<BigInteger256>,
+        // wires: (&[F], &[F], &[F], &[F]),
         beta: F,
         gamma: F,
-        sigma_polys: (
-            &DensePolynomial<F>,
-            &DensePolynomial<F>,
-            &DensePolynomial<F>,
-            &DensePolynomial<F>,
-        ),
-    ) -> DensePolynomial<F> {
+        // sigma_polys: (&Vec<F>, &Vec<F>, &Vec<F>, &Vec<F>),
+        sigma: &DeviceMemory<BigInteger256>,
+        kern: &PolyKernel<GpuFr>,
+        gpu_container: &mut GpuPolyContainer<GpuFr>,
+        msm_context: &MSMContext<'a, 'b, G>,
+    ) where
+        G: AffineCurve,
+        F: FftField,
+    {
         let n = domain.size();
+        let start = std::time::Instant::now();
 
         // Constants defining cosets H, k1H, k2H, etc
         let ks = vec![F::one(), K1::<F>(), K2::<F>(), K3::<F>()];
 
-        let sigma_mappings = (
-            domain.fft(sigma_polys.0),
-            domain.fft(sigma_polys.1),
-            domain.fft(sigma_polys.2),
-            domain.fft(sigma_polys.3),
-        );
+        // let omega = domain.group_gen();
+        // let omega_inv = domain.group_gen_inv();
+        let size_inv = domain.size_inv();
 
+        let start = std::time::Instant::now();
         // Transpose wires and sigma values to get "rows" in the form [wl_i,
         // wr_i, wo_i, ... ] where each row contains the wire and sigma
         // values for a single gate
-        let gatewise_wires = izip!(wires.0, wires.1, wires.2, wires.3)
-            .map(|(w0, w1, w2, w3)| vec![w0, w1, w2, w3]);
-        let gatewise_sigmas = izip!(
-            sigma_mappings.0,
-            sigma_mappings.1,
-            sigma_mappings.2,
-            sigma_mappings.3
-        )
-        .map(|(s0, s1, s2, s3)| vec![s0, s1, s2, s3]);
 
-        // Compute all roots
-        // Non-parallelizable?
-        let roots: Vec<F> = domain.elements().collect();
+        let mut w_l_gpu_orig =
+            gpu_container.find(kern, "w_l_poly_orig").unwrap();
+        let mut w_r_gpu_orig =
+            gpu_container.find(kern, "w_r_poly_orig").unwrap();
+        let mut w_o_gpu_orig =
+            gpu_container.find(kern, "w_o_poly_orig").unwrap();
+        let mut w_4_gpu_orig =
+            gpu_container.find(kern, "w_4_poly_orig").unwrap();
 
-        let product_argument = izip!(roots, gatewise_sigmas, gatewise_wires)
-            // Associate each wire value in a gate with the k defining its coset
-            .map(|(gate_root, gate_sigmas, gate_wires)| {
-                (gate_root, izip!(gate_sigmas, gate_wires, &ks))
-            })
-            // Now the ith element represents gate i and will have the form:
-            //   (root_i, ((w0_i, s0_i, k0), (w1_i, s1_i, k1), ..., (wm_i, sm_i,
-            // km)))   for m different wires, which is all the
-            // information   needed for a single product coefficient
-            // for a single gate Multiply up the numerator and
-            // denominator irreducibles for each gate   and pair the
-            // results
-            .map(|(gate_root, wire_params)| {
-                (
-                    // Numerator product
-                    wire_params
-                        .clone()
-                        .map(|(_sigma, wire, k)| {
-                            Permutation::numerator_irreducible(
-                                gate_root, *wire, *k, beta, gamma,
-                            )
-                        })
-                        .product::<F>(),
-                    // Denominator product
-                    wire_params
-                        .map(|(sigma, wire, _k)| {
-                            Permutation::denominator_irreducible(
-                                gate_root, *wire, sigma, beta, gamma,
-                            )
-                        })
-                        .product::<F>(),
-                )
-            })
-            // Divide each pair to get the single scalar representing each gate
-            .map(|(n, d)| n * d.inverse().unwrap())
-            // Collect into vector intermediary since rayon does not support
-            // `scan`
-            .collect::<Vec<F>>();
+        let mut gatewise_wires_poly = gpu_container
+            .ask_for(kern, w_l_gpu_orig.size() * 4)
+            .unwrap();
+        gatewise_wires_poly.fill_with_fe(&F::zero()).unwrap();
+        kern.sync().unwrap();
 
-        let mut z = Vec::with_capacity(n);
+        let w_l_gpu = unsafe {
+            std::mem::transmute::<_, &DeviceMemory<BigInteger256>>(
+                w_l_gpu_orig.get_memory(),
+            )
+        };
+        let w_r_gpu = unsafe {
+            std::mem::transmute::<_, &DeviceMemory<BigInteger256>>(
+                w_r_gpu_orig.get_memory(),
+            )
+        };
+        let w_o_gpu = unsafe {
+            std::mem::transmute::<_, &DeviceMemory<BigInteger256>>(
+                w_o_gpu_orig.get_memory(),
+            )
+        };
+        let w_4_gpu = unsafe {
+            std::mem::transmute::<_, &DeviceMemory<BigInteger256>>(
+                w_4_gpu_orig.get_memory(),
+            )
+        };
+        let gatewise_wires_gpu = unsafe {
+            std::mem::transmute::<_, &DeviceMemory<BigInteger256>>(
+                gatewise_wires_poly.get_memory(),
+            )
+        };
+        wires_to_single_gate(
+            w_l_gpu,
+            w_r_gpu,
+            w_o_gpu,
+            w_4_gpu,
+            gatewise_wires_gpu,
+            msm_context,
+        );
 
-        // First element is one
-        let mut state = F::one();
-        z.push(state);
+        // w_l_gpu_orig.fill_with_zero().unwrap();
+        // gpu_container.recycle(w_l_gpu_orig).unwrap();
+        // w_r_gpu_orig.fill_with_zero().unwrap();
+        // gpu_container.recycle(w_r_gpu_orig).unwrap();
+        // w_o_gpu_orig.fill_with_zero().unwrap();
+        // gpu_container.recycle(w_o_gpu_orig).unwrap();
+        // w_4_gpu_orig.fill_with_zero().unwrap();
+        // gpu_container.recycle(w_4_gpu_orig).unwrap();
+        // gatewise_wires_poly.fill_with_zero().unwrap();
 
-        // Accumulate by successively multiplying the scalars
-        // Non-parallelizable?
-        for s in product_argument {
-            state *= s;
-            z.push(state);
-        }
+        // gpu_container.recycle(gatewise_wires_poly).unwrap();
+        // gpu_container.save("w_l_poly_orig", w_l_gpu_orig).unwrap();
+        // gpu_container.save("w_r_poly_orig", w_r_gpu_orig).unwrap();
+        // gpu_container.save("w_o_poly_orig", w_o_gpu_orig).unwrap();
+        // gpu_container.save("w_4_poly_orig", w_4_gpu_orig).unwrap();
+        // gpu_container.recycle(gatewise_wires_gpu).unwrap();
 
-        // Remove the last(n+1'th) element
-        z.remove(n);
+        let ks = unsafe { std::mem::transmute::<_, &Vec<BigInteger256>>(&ks) };
+        let beta = unsafe { std::mem::transmute::<_, &BigInteger256>(&beta) };
+        let gamma = unsafe { std::mem::transmute::<_, &BigInteger256>(&gamma) };
 
-        assert_eq!(n, z.len());
+        /* find z_value_poly */
+        let z_poly = gpu_container.find(&kern, "z_poly");
+        let mut z_poly = match z_poly {
+            Ok(poly) => poly,
+            Err(_) => {
+                let z = gpu_container.ask_for(&kern, n).unwrap();
+                z
+            }
+        };
 
-        DensePolynomial::<F>::from_coefficients_vec(domain.ifft(&z))
+        // z_poly.fill_with_fe(&F::zero()).unwrap();
+        // z_poly.sync().unwrap();
+        // kern.sync().unwrap();
+
+        let count = gate_roots.size();
+        let mut dest_gpu = gpu_container.ask_for(&kern, count).unwrap();
+        // dest_gpu.fill_with_fe(&F::zero()).unwrap();
+
+        let mut d_dest_gpu = gpu_container.ask_for(&kern, count).unwrap();
+        // d_dest_gpu.fill_with_fe(&F::zero()).unwrap();
+
+        let mut ks_gpu = gpu_container.ask_for(&kern, ks.len()).unwrap();
+        // ks_gpu.fill_with_fe(&F::zero()).unwrap();
+        // ks_gpu.fill_with_zero().unwrap(); //???
+        let mut beta_gpu = gpu_container.ask_for(&kern, 1).unwrap();
+        let mut gamma_gpu = gpu_container.ask_for(&kern, 1).unwrap();
+
+        let chunk_size = 512;
+        let chunks = count / chunk_size;
+
+        let mut z_iv = gpu_container.ask_for(&kern, chunks).unwrap();
+        let mut z_piv = gpu_container.ask_for(&kern, chunks).unwrap();
+
+        let _dest_gpu = unsafe {
+            std::mem::transmute::<_, &DeviceMemory<BigInteger256>>(
+                dest_gpu.get_memory(),
+            )
+        };
+
+        let _d_dest_gpu = unsafe {
+            std::mem::transmute::<_, &DeviceMemory<BigInteger256>>(
+                d_dest_gpu.get_memory(),
+            )
+        };
+
+        let _ks_gpu = unsafe {
+            std::mem::transmute::<_, &DeviceMemory<BigInteger256>>(
+                ks_gpu.get_memory(),
+            )
+        };
+
+        let _beta_gpu = unsafe {
+            std::mem::transmute::<_, &DeviceMemory<BigInteger256>>(
+                beta_gpu.get_memory(),
+            )
+        };
+
+        let _gamma_gpu = unsafe {
+            std::mem::transmute::<_, &DeviceMemory<BigInteger256>>(
+                gamma_gpu.get_memory(),
+            )
+        };
+        let _z_iv = unsafe {
+            std::mem::transmute::<_, &DeviceMemory<BigInteger256>>(
+                z_iv.get_memory(),
+            )
+        };
+        let _z_piv = unsafe {
+            std::mem::transmute::<_, &DeviceMemory<BigInteger256>>(
+                z_piv.get_memory(),
+            )
+        };
+
+        _ks_gpu.read_from(&ks, ks.len()).unwrap();
+        _beta_gpu.read_from(vec![*beta].as_slice(), 1).unwrap();
+        _gamma_gpu.read_from(vec![*gamma].as_slice(), 1).unwrap();
+
+        let start = std::time::Instant::now();
+        product_argument_test(
+            gate_roots,
+            sigma,
+            gatewise_wires_gpu,
+            z_poly.get_memory().get_inner(),
+            msm_context,
+            &_dest_gpu,
+            &_d_dest_gpu,
+            &_ks_gpu,
+            &_beta_gpu,
+            &_gamma_gpu,
+            _z_iv,
+            _z_piv,
+        );
+
+        gpu_container.save("z_poly", z_poly).unwrap();
+
+        // DensePolynomial::<F>::from_coefficients_vec(domain.ifft(&z))
+        gpu_ifft_without_back_noread(
+            kern,
+            gpu_container,
+            "z_poly",
+            n,
+            size_inv,
+        );
+        kern.sync().unwrap();
+
+        gpu_container.recycle(ks_gpu).unwrap();
+        gpu_container.recycle(dest_gpu).unwrap();
+        gpu_container.recycle(d_dest_gpu).unwrap();
+        gpu_container.recycle(beta_gpu).unwrap();
+        gpu_container.recycle(gamma_gpu).unwrap();
+        gpu_container.recycle(z_iv).unwrap();
+        gpu_container.recycle(z_piv).unwrap();
+
+        w_l_gpu_orig.fill_with_zero().unwrap();
+        gpu_container.recycle(w_l_gpu_orig).unwrap();
+        w_r_gpu_orig.fill_with_zero().unwrap();
+        gpu_container.recycle(w_r_gpu_orig).unwrap();
+        w_o_gpu_orig.fill_with_zero().unwrap();
+        gpu_container.recycle(w_o_gpu_orig).unwrap();
+        w_4_gpu_orig.fill_with_zero().unwrap();
+        gpu_container.recycle(w_4_gpu_orig).unwrap();
+        gatewise_wires_poly.fill_with_zero().unwrap();
+        gpu_container.recycle(gatewise_wires_poly).unwrap();
     }
 
     pub(crate) fn compute_lookup_permutation_poly<F: FftField>(
@@ -762,7 +1422,7 @@ impl Permutation {
         epsilon: F,
     ) -> DensePolynomial<F> {
         let n = domain.size();
-
+        /*
         assert_eq!(f.len(), n);
         assert_eq!(t.len(), n);
         assert_eq!(h_1.len(), n);
@@ -798,6 +1458,34 @@ impl Permutation {
         assert_eq!(n, p.len());
 
         DensePolynomial::from_coefficients_vec(domain.ifft(&p))
+
+        println!(
+                "compute_lookup_permutation_poly, 1 spent:{:?}",
+                start.elapsed()
+            );
+            let start = std::time::Instant::now();
+
+            let ret = DensePolynomial::from_coefficients_vec(domain.ifft(&p));
+            println!(
+                "compute_lookup_permutation_poly, 2 spent:{:?}",
+                start.elapsed()
+            );
+
+            ret
+         */
+        let coeff = Self::lookup_ratio(
+            delta,
+            epsilon,
+            F::zero(),
+            F::zero(),
+            F::zero(),
+            F::zero(),
+            F::zero(),
+            F::zero(),
+        );
+        let mut coeff_v = vec![F::zero(); n];
+        coeff_v[0] = coeff;
+        DensePolynomial::from_coefficients_vec(coeff_v)
     }
 
     fn lookup_ratio<F: FftField>(
@@ -871,13 +1559,13 @@ mod test {
 
         let pad = vec![F::zero(); domain.size() - cs.w_l.len()];
         let mut w_l_scalar: Vec<F> =
-            cs.w_l.iter().map(|v| cs.variables[v]).collect();
+            cs.w_l.iter().map(|v| cs.variable_vec[v.0]).collect();
         let mut w_r_scalar: Vec<F> =
-            cs.w_r.iter().map(|v| cs.variables[v]).collect();
+            cs.w_r.iter().map(|v| cs.variables_vec[v.0]).collect();
         let mut w_o_scalar: Vec<F> =
-            cs.w_o.iter().map(|v| cs.variables[v]).collect();
+            cs.w_o.iter().map(|v| cs.variables_vec[v.0]).collect();
         let mut w_4_scalar: Vec<F> =
-            cs.w_4.iter().map(|v| cs.variables[v]).collect();
+            cs.w_4.iter().map(|v| cs.variables_vec[v.0]).collect();
 
         w_l_scalar.extend(&pad);
         w_r_scalar.extend(&pad);
@@ -1255,7 +1943,7 @@ mod test {
         let gamma = F::rand(&mut OsRng);
         assert_ne!(gamma, beta);
 
-        //1. Compute the permutation polynomial using both methods
+        // 1. Compute the permutation polynomial using both methods
         //
         let (
             left_sigma_poly,
@@ -1316,7 +2004,7 @@ mod test {
         }
         assert_eq!(a_0 * b_0.inverse().unwrap(), F::one());
 
-        //3. Now we perform the two checks that need to be done on the
+        // 3. Now we perform the two checks that need to be done on the
         // permutation polynomial (z)
         let z_poly =
             DensePolynomial::<F>::from_coefficients_vec(domain.ifft(&z_vec));

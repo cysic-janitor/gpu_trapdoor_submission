@@ -11,7 +11,8 @@
 
 use crate::constraint_system::{StandardComposer, Variable, WireData};
 use ark_ec::TEModelParameters;
-use ark_ff::{BigInteger, PrimeField};
+use ark_ff::PrimeField;
+use ark_ff::BigInteger;
 
 impl<F, P> StandardComposer<F, P>
 where
@@ -53,14 +54,14 @@ where
         let mut left_quad: u8;
         let mut right_quad: u8;
         // Get vars as bits and reverse them to get the Little Endian repr.
-        let a_bits: Vec<_> = self.variables[&a]
+        let a_bits: Vec<_> = self.variables_vec[a.0]
             .into_repr()
             .to_bits_be()
             .iter()
             .skip(256 - num_bits)
             .map(|bit| *bit as u8)
             .collect();
-        let b_bits: Vec<_> = self.variables[&b]
+        let b_bits: Vec<_> = self.variables_vec[b.0]
             .into_repr()
             .to_bits_be()
             .iter()

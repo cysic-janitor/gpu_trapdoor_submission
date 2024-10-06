@@ -13,6 +13,7 @@ use crate::{
         widget::GateConstraint,
         ProverKey,
     },
+    util::EvaluationDomainExt,
 };
 use ark_ec::TEModelParameters;
 use ark_ff::{FftField, PrimeField};
@@ -20,6 +21,7 @@ use ark_poly::{
     univariate::DensePolynomial, EvaluationDomain, GeneralEvaluationDomain,
     UVPolynomial,
 };
+use ec_gpu_common::{Fr as GpuFr, GpuPolyContainer, PolyKernel};
 
 use super::{
     ecc::{CAVals, FBSMVals},
@@ -70,7 +72,6 @@ where
 
     let l1_poly = compute_first_lagrange_poly_scaled(domain, F::one());
     let l1_eval_8n = domain_8n.coset_fft(&l1_poly);
-
     let mut z_eval_8n = domain_8n.coset_fft(z_poly);
     z_eval_8n.push(z_eval_8n[0]);
     z_eval_8n.push(z_eval_8n[1]);
@@ -195,8 +196,9 @@ where
     let quotient = (0..domain_8n.size())
         .map(|i| {
             let numerator = gate_constraints[i] + permutation[i] + lookup[i];
-            let denominator = prover_key.v_h_coset_8n()[i];
-            numerator * denominator.inverse().unwrap()
+            let denominator = prover_key.v_h_coset_8n_inv()[i];
+            //numerator * denominator.inverse().unwrap()
+            numerator * denominator
         })
         .collect::<Vec<_>>();
 
@@ -231,7 +233,6 @@ where
             <<F as FftField>::FftParams as ark_ff::FftParameters>::TWO_ADICITY,
     })?;
     let pi_eval_8n = domain_8n.coset_fft(pi_poly);
-
     // TODO Eliminate contribution of unused gates
     Ok((0..domain_8n.size())
         .map(|i| {
@@ -242,58 +243,59 @@ where
                 d_val: w4_eval_8n[i],
             };
 
-            let custom_vals = CustomEvaluations {
-                vals: vec![
-                    ("a_next_eval".to_string(), wl_eval_8n[i + 8]),
-                    ("b_next_eval".to_string(), wr_eval_8n[i + 8]),
-                    ("d_next_eval".to_string(), w4_eval_8n[i + 8]),
-                    ("q_l_eval".to_string(), prover_key.arithmetic.q_l.1[i]),
-                    ("q_r_eval".to_string(), prover_key.arithmetic.q_r.1[i]),
-                    ("q_c_eval".to_string(), prover_key.arithmetic.q_c.1[i]),
-                    // prob don't need the follow but nonetheless...
-                    ("q_hl_eval".to_string(), prover_key.arithmetic.q_hl.1[i]),
-                    ("q_hr_eval".to_string(), prover_key.arithmetic.q_hr.1[i]),
-                    ("q_h4_eval".to_string(), prover_key.arithmetic.q_hr.1[i]),
-                ],
-            };
+            //let custom_vals = CustomEvaluations {
+            //    vals: vec![
+            //        ("a_next_eval".to_string(), wl_eval_8n[i + 8]),
+            //        ("b_next_eval".to_string(), wr_eval_8n[i + 8]),
+            //        ("d_next_eval".to_string(), w4_eval_8n[i + 8]),
+            //        ("q_l_eval".to_string(), prover_key.arithmetic.q_l.1[i]),
+            //        ("q_r_eval".to_string(), prover_key.arithmetic.q_r.1[i]),
+            //        ("q_c_eval".to_string(), prover_key.arithmetic.q_c.1[i]),
+            //        // prob don't need the follow but nonetheless...
+            //        ("q_hl_eval".to_string(),
+            // prover_key.arithmetic.q_hl.1[i]),        ("q_hr_eval"
+            // .to_string(), prover_key.arithmetic.q_hr.1[i]),
+            //        ("q_h4_eval".to_string(),
+            // prover_key.arithmetic.q_hr.1[i]),    ],
+            //};
 
             let arithmetic =
                 prover_key.arithmetic.compute_quotient_i(i, wit_vals);
 
-            let range = Range::quotient_term(
-                prover_key.range_selector.1[i],
-                range_challenge,
-                wit_vals,
-                RangeVals::from_evaluations(&custom_vals),
-            );
+            //let range = Range::quotient_term(
+            //    prover_key.range_selector.1[i],
+            //    range_challenge,
+            //    wit_vals,
+            //    RangeVals::from_evaluations(&custom_vals),
+            //);
 
-            let logic = Logic::quotient_term(
-                prover_key.logic_selector.1[i],
-                logic_challenge,
-                wit_vals,
-                LogicVals::from_evaluations(&custom_vals),
-            );
+            //let logic = Logic::quotient_term(
+            //    prover_key.logic_selector.1[i],
+            //    logic_challenge,
+            //    wit_vals,
+            //    LogicVals::from_evaluations(&custom_vals),
+            //);
 
-            let fixed_base_scalar_mul =
-                FixedBaseScalarMul::<_, P>::quotient_term(
-                    prover_key.fixed_group_add_selector.1[i],
-                    fixed_base_challenge,
-                    wit_vals,
-                    FBSMVals::from_evaluations(&custom_vals),
-                );
+            //let fixed_base_scalar_mul =
+            //    FixedBaseScalarMul::<_, P>::quotient_term(
+            //        prover_key.fixed_group_add_selector.1[i],
+            //        fixed_base_challenge,
+            //        wit_vals,
+            //        FBSMVals::from_evaluations(&custom_vals),
+            //    );
 
-            let curve_addition = CurveAddition::<_, P>::quotient_term(
-                prover_key.variable_group_add_selector.1[i],
-                var_base_challenge,
-                wit_vals,
-                CAVals::from_evaluations(&custom_vals),
-            );
+            //let curve_addition = CurveAddition::<_, P>::quotient_term(
+            //    prover_key.variable_group_add_selector.1[i],
+            //    var_base_challenge,
+            //    wit_vals,
+            //    CAVals::from_evaluations(&custom_vals),
+            //);
 
             (arithmetic + pi_eval_8n[i])
-                + range
-                + logic
-                + fixed_base_scalar_mul
-                + curve_addition
+            //    + range
+            //    + logic
+            //    + fixed_base_scalar_mul
+            //    + curve_addition
         })
         .collect())
 }

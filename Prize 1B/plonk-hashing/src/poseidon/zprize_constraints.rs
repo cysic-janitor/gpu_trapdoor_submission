@@ -9,13 +9,14 @@ use crate::poseidon::constants::PoseidonConstants;
 use ark_ec::TEModelParameters;
 use ark_ff::PrimeField;
 use core::marker::PhantomData;
-use derivative::Derivative;
+use plonk_core::permutation::Permutation;
 use plonk_core::{
     constraint_system::StandardComposer,
     prelude::{self as plonk, Variable},
 };
 
 use super::poseidon_ref::PoseidonRefSpec;
+use derivative::Derivative;
 
 #[derive(Derivative)]
 #[derivative(Debug(bound = ""))]
@@ -42,6 +43,23 @@ impl<COM, S: PoseidonRefSpec<COM, WIDTH>, const WIDTH: usize>
     ) -> Self {
         let mut elements = S::zeros(c);
         elements[0] = S::alloc(c, constants.domain_tag);
+        PoseidonZZRef {
+            constants_offset: 0,
+            current_round: 0,
+            elements,
+            pos: 1,
+            constants,
+        }
+    }
+
+    pub fn new_2(
+        c: &mut COM,
+        constants: PoseidonConstants<S::ParameterField>,
+        gate_index: &mut usize,
+    ) -> Self {
+        let mut elements: [<S as PoseidonRefSpec<COM, WIDTH>>::Field; WIDTH] =
+            S::zeros(c);
+        elements[0] = S::alloc_2(c, constants.domain_tag, gate_index);
         PoseidonZZRef {
             constants_offset: 0,
             current_round: 0,
@@ -78,7 +96,6 @@ impl<COM, S: PoseidonRefSpec<COM, WIDTH>, const WIDTH: usize>
         Ok(self.pos - 1)
     }
 
-    /// Output the hash
     pub fn output_hash(&mut self, c: &mut COM) -> S::Field {
         S::full_round(
             c,
@@ -86,6 +103,11 @@ impl<COM, S: PoseidonRefSpec<COM, WIDTH>, const WIDTH: usize>
             &mut self.constants_offset,
             &mut self.elements,
         );
+
+        // println!(
+        //     "1-1 output-hash spent :{:?}, id:{:?}",
+        //     start.elapsed(), main_thread_id
+        // );
 
         for _ in 1..self.constants.half_full_rounds {
             S::full_round(
@@ -96,12 +118,18 @@ impl<COM, S: PoseidonRefSpec<COM, WIDTH>, const WIDTH: usize>
             );
         }
 
+        // println!("1-2 self.elements[1] :{:?}, id:{:?}",  self.elements[1],
+        // main_thread_id);
+
         S::partial_round(
             c,
             &self.constants,
             &mut self.constants_offset,
             &mut self.elements,
         );
+
+        // println!("1-3 self.elements[1] :{:?}, id:{:?}",  self.elements[1],
+        // main_thread_id);
 
         for _ in 1..self.constants.partial_rounds {
             S::partial_round(
@@ -112,6 +140,9 @@ impl<COM, S: PoseidonRefSpec<COM, WIDTH>, const WIDTH: usize>
             );
         }
 
+        // println!("1-4 self.elements[1] :{:?}, id:{:?}",  self.elements[1],
+        // main_thread_id);
+
         for _ in 0..self.constants.half_full_rounds {
             S::full_round(
                 c,
@@ -120,11 +151,86 @@ impl<COM, S: PoseidonRefSpec<COM, WIDTH>, const WIDTH: usize>
                 &mut self.elements,
             )
         }
+        // println!("1-5 self.elements[1] :{:?}, id:{:?}",  self.elements[1],
+        // main_thread_id);
 
         self.elements[1].clone()
     }
-}
 
+    /// Output the hash
+    pub fn output_hash_2(
+        &mut self,
+        c: &mut COM,
+        gate_index: &mut usize,
+        variable_index: &mut usize,
+        // perm: &mut Permutation,
+        reuse_perm: bool,
+    ) -> S::Field {
+        S::full_round_2(
+            c,
+            &self.constants,
+            &mut self.constants_offset,
+            &mut self.elements,
+            gate_index,
+            variable_index,
+            // perm,
+            reuse_perm,
+        );
+
+        for _ in 1..self.constants.half_full_rounds {
+            S::full_round_2(
+                c,
+                &self.constants,
+                &mut self.constants_offset,
+                &mut self.elements,
+                gate_index,
+                variable_index,
+                // perm,
+                reuse_perm,
+            );
+        }
+
+        S::partial_round_2(
+            c,
+            &self.constants,
+            &mut self.constants_offset,
+            &mut self.elements,
+            gate_index,
+            variable_index,
+            // perm,
+            reuse_perm,
+        );
+
+        for _ in 1..self.constants.partial_rounds {
+            S::partial_round_2(
+                c,
+                &self.constants,
+                &mut self.constants_offset,
+                &mut self.elements,
+                gate_index,
+                variable_index,
+                // perm,
+                reuse_perm,
+            );
+        }
+
+        for _ in 0..self.constants.half_full_rounds {
+            S::full_round_2(
+                c,
+                &self.constants,
+                &mut self.constants_offset,
+                &mut self.elements,
+                gate_index,
+                variable_index,
+                // perm,
+                reuse_perm,
+            )
+        }
+        self.elements[1].clone()
+    }
+}
+use ark_serialize::*;
+#[derive(CanonicalDeserialize, CanonicalSerialize)]
 pub struct PlonkSpecZZ<F: PrimeField> {
     _field: PhantomData<F>,
 }
@@ -149,7 +255,6 @@ impl<
             .iter()
             .skip(*constants_offset)
             .collect::<Vec<_>>();
-
         let mut res = *state;
         if *constants_offset == 0 {
             // first round
@@ -158,6 +263,7 @@ impl<
                 &res[0],
                 pre_round_keys[0],
             );
+
             res[1] = <Self as PoseidonRefSpec<_, WIDTH>>::addi(
                 c,
                 &res[1],
@@ -200,6 +306,7 @@ impl<
                 -F::one(),
             ],
         );
+
         state[2] = c.full_affine_transform_gate(
             &[res[0], res[1], res[2]],
             &[
@@ -210,6 +317,113 @@ impl<
                 -F::one(),
             ],
         );
+
+        *constants_offset += WIDTH;
+    }
+
+    fn full_round_2(
+        c: &mut StandardComposer<F, P>,
+        constants: &PoseidonConstants<Self::ParameterField>,
+        constants_offset: &mut usize,
+        state: &mut [Self::Field; WIDTH],
+        index: &mut usize,
+        variable_index: &mut usize,
+        // perm: &mut Permutation,
+        reuse_perm: bool,
+    ) {
+        let pre_round_keys = constants
+            .round_constants
+            .iter()
+            .skip(*constants_offset)
+            .collect::<Vec<_>>();
+
+        let mut res = *state;
+        if *constants_offset == 0 {
+            // first round
+            res[0] = <Self as PoseidonRefSpec<_, WIDTH>>::addi_2(
+                c,
+                &res[0],
+                pre_round_keys[0],
+                index,
+                variable_index,
+                // perm,
+                reuse_perm,
+            );
+            res[1] = <Self as PoseidonRefSpec<_, WIDTH>>::addi_2(
+                c,
+                &res[1],
+                pre_round_keys[1],
+                index,
+                variable_index,
+                // perm,
+                reuse_perm,
+            );
+            res[2] = <Self as PoseidonRefSpec<_, WIDTH>>::addi_2(
+                c,
+                &res[2],
+                pre_round_keys[2],
+                index,
+                variable_index,
+                // perm,
+                reuse_perm,
+            );
+        }
+
+        let zero = F::zero();
+        let current_round_key = if pre_round_keys.len() == 3 {
+            // Last round
+            (&zero, &zero, &zero)
+        } else {
+            (pre_round_keys[3], pre_round_keys[4], pre_round_keys[5])
+        };
+
+        let matrix = &constants.mds_matrices.m.iter_rows().collect::<Vec<_>>();
+
+        state[0] = c.full_affine_transform_gate_2(
+            &[res[0], res[1], res[2]],
+            &[
+                matrix[0][0],
+                matrix[0][1],
+                matrix[0][2],
+                *current_round_key.0,
+                -F::one(),
+            ],
+            index,
+            variable_index,
+            // perm,
+            reuse_perm,
+        );
+
+        state[1] = c.full_affine_transform_gate_2(
+            &[res[0], res[1], res[2]],
+            &[
+                matrix[1][0],
+                matrix[1][1],
+                matrix[1][2],
+                *current_round_key.1,
+                -F::one(),
+            ],
+            index,
+            variable_index,
+            // perm,
+            reuse_perm,
+        );
+
+        state[2] = c.full_affine_transform_gate_2(
+            &[res[0], res[1], res[2]],
+            &[
+                matrix[2][0],
+                matrix[2][1],
+                matrix[2][2],
+                *current_round_key.2,
+                -F::one(),
+            ],
+            index,
+            variable_index,
+            // perm,
+            reuse_perm,
+        );
+
         *constants_offset += WIDTH;
     }
 
@@ -261,11 +475,85 @@ impl<
         *constants_offset += WIDTH;
     }
 
+    fn partial_round_2(
+        c: &mut StandardComposer<F, P>,
+        constants: &PoseidonConstants<Self::ParameterField>,
+        constants_offset: &mut usize,
+        state: &mut [Self::Field; WIDTH],
+        index: &mut usize,
+        variable_index: &mut usize,
+        // perm: &mut Permutation,
+        reuse_perm: bool,
+    ) {
+        let pre_round_keys = constants
+            .round_constants
+            .iter()
+            .skip(*constants_offset)
+            .collect::<Vec<_>>();
+
+        let res = *state;
+        let matrix = &constants.mds_matrices.m.iter_rows().collect::<Vec<_>>();
+
+        state[0] = c.partial_affine_transform_gate_2(
+            &[res[0], res[1], res[2]],
+            &[
+                matrix[0][0],
+                matrix[0][1],
+                matrix[0][2],
+                *pre_round_keys[3],
+                -F::one(),
+            ],
+            index,
+            variable_index,
+            // perm,
+            reuse_perm,
+        );
+
+        state[1] = c.partial_affine_transform_gate_2(
+            &[res[0], res[1], res[2]],
+            &[
+                matrix[1][0],
+                matrix[1][1],
+                matrix[1][2],
+                *pre_round_keys[4],
+                -F::one(),
+            ],
+            index,
+            variable_index,
+            // perm,
+            reuse_perm,
+        );
+
+        state[2] = c.partial_affine_transform_gate_2(
+            &[res[0], res[1], res[2]],
+            &[
+                matrix[2][0],
+                matrix[2][1],
+                matrix[2][2],
+                *pre_round_keys[5],
+                -F::one(),
+            ],
+            index,
+            variable_index,
+            // perm,
+            reuse_perm,
+        );
+        *constants_offset += WIDTH;
+    }
+
     fn alloc(
         c: &mut StandardComposer<F, P>,
         v: Self::ParameterField,
     ) -> Self::Field {
         c.add_input(v)
+    }
+
+    fn alloc_2(
+        c: &mut StandardComposer<F, P>,
+        v: Self::ParameterField,
+        gate_index: &mut usize,
+    ) -> Self::Field {
+        c.add_input_2(v, gate_index, false)
     }
 
     fn zeros<const W: usize>(
@@ -295,6 +583,29 @@ impl<
         })
     }
 
+    fn addi_2(
+        c: &mut StandardComposer<F, P>,
+        a: &Self::Field,
+        b: &Self::ParameterField,
+        gate_index: &mut usize,
+        variable_index: &mut usize,
+        // perm: &mut Permutation,
+        reuse_perm: bool,
+    ) -> Self::Field {
+        let zero = c.zero_var();
+        c.arithmetic_gate_2(
+            |g| {
+                g.witness(*a, zero, None)
+                    .add(F::one(), F::zero())
+                    .constant(*b)
+            },
+            gate_index,
+            variable_index,
+            // perm,
+            reuse_perm,
+        )
+    }
+
     fn mul(
         _c: &mut StandardComposer<F, P>,
         _x: &Self::Field,
@@ -311,7 +622,8 @@ impl<
         unimplemented!()
     }
 }
-
+use ark_serialize::*;
+#[derive(CanonicalDeserialize, CanonicalSerialize)]
 pub struct PlonkSpecRef;
 
 impl<F, P, const WIDTH: usize>
@@ -328,6 +640,14 @@ where
         v: Self::ParameterField,
     ) -> Self::Field {
         c.add_input(v)
+    }
+
+    fn alloc_2(
+        c: &mut StandardComposer<F, P>,
+        v: Self::ParameterField,
+        _: &mut usize,
+    ) -> Self::Field {
+        unimplemented!()
     }
 
     fn zeros<const W: usize>(
@@ -348,6 +668,17 @@ where
         _c: &mut StandardComposer<F, P>,
         _a: &Self::Field,
         _b: &Self::ParameterField,
+    ) -> Self::Field {
+        unimplemented!()
+    }
+    fn addi_2(
+        _c: &mut StandardComposer<F, P>,
+        _a: &Self::Field,
+        _b: &Self::ParameterField,
+        _index: &mut usize,
+        _variable_index: &mut usize,
+        // _perm: &mut Permutation,
+        _reuse_perm: bool,
     ) -> Self::Field {
         unimplemented!()
     }

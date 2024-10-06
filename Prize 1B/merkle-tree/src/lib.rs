@@ -1,5 +1,6 @@
 use ark_bls12_381::Fr;
 use ark_ed_on_bls12_381::EdwardsParameters;
+use plonk_core::permutation::Permutation;
 use plonk_core::prelude::{StandardComposer, Variable};
 use plonk_hashing::poseidon::{
     constants::PoseidonConstants,
@@ -55,6 +56,63 @@ pub(crate) fn assert_hash_constraints(
     let _ = poseidon.input(composer.zero_var());
 
     let output_rec = poseidon.output_hash(composer);
-
     composer.assert_equal(*output, output_rec);
+}
+
+#[inline]
+pub(crate) fn assert_hash_constraints_2(
+    composer: &StandardComposer<Fr, EdwardsParameters>,
+    param: &PoseidonConstants<Fr>,
+    left: &Variable,
+    right: &Variable,
+    output: &Variable,
+    hash_number: usize,
+    init_variables_size: usize,
+    // perm: &mut Permutation,
+    reuse_perm: bool,
+) {
+    let c: *const StandardComposer<Fr, EdwardsParameters> = composer;
+    let composer = c as *mut StandardComposer<Fr, EdwardsParameters>;
+    let composer = {
+        unsafe {
+            let mut_ref: &mut StandardComposer<Fr, EdwardsParameters> =
+                &mut *composer;
+            mut_ref
+        }
+    };
+    let mut variable_index = 193 * hash_number + init_variables_size;
+
+    let mut poseidon = {
+        PoseidonZZRef::<_, PlonkSpecZZ<Fr>, 3>::new_2(
+            composer,
+            param.clone(),
+            &mut variable_index,
+        )
+    };
+
+    let _ = poseidon.input(*left);
+    let _ = poseidon.input(*right);
+    // pad the last input to stop extension attacks
+    let _ = poseidon.input(composer.zero_var());
+
+    let mut gate_index = 4;
+    if hash_number != 0 {
+        gate_index += 193 * hash_number;
+    }
+
+    let output_rec = poseidon.output_hash_2(
+        composer,
+        &mut gate_index,
+        &mut variable_index,
+        // perm,
+        reuse_perm,
+    );
+
+    composer.assert_equal_2(
+        *output,
+        output_rec,
+        &mut gate_index,
+        // perm,
+        reuse_perm,
+    );
 }

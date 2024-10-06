@@ -8,7 +8,8 @@
 
 use crate::constraint_system::{StandardComposer, Variable, WireData};
 use ark_ec::TEModelParameters;
-use ark_ff::{BigInteger, PrimeField};
+use ark_ff::PrimeField;
+use ark_ff::BigInteger;
 
 impl<F, P> StandardComposer<F, P>
 where
@@ -63,7 +64,9 @@ where
         assert!(num_bits % 2 == 0);
 
         // Convert witness to bit representation and reverse
-        let bits = self.variables[&witness].into_repr().to_bits_le();
+        let bits = self.variables_vec[witness.0]
+            .into_repr()
+            .to_bits_le();
 
         // For a width-4 program, one gate will contain 4 accumulators
         // Each accumulator proves that a single quad is a base-4 digit.

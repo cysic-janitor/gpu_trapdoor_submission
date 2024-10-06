@@ -5,13 +5,16 @@ use crate::poseidon::PoseidonError;
 use crate::poseidon::constants::PoseidonConstants;
 use ark_ec::TEModelParameters;
 use ark_ff::PrimeField;
+use ark_serialize::*;
+use ark_serialize::*;
 use core::{fmt::Debug, marker::PhantomData};
 use derivative::Derivative;
+use plonk_core::permutation::Permutation;
 use plonk_core::{constraint_system::StandardComposer, prelude as plonk};
 
 pub trait PoseidonRefSpec<COM, const WIDTH: usize> {
     /// Field used as state
-    type Field: Debug + Clone;
+    type Field: Debug + Clone + CanonicalDeserialize + CanonicalSerialize;
     /// Field used as constant paramater
     type ParameterField: PrimeField; // TODO: for now, only prime field is supported. Can be used for arkplonk
                                      // and arkworks which uses the same
@@ -38,7 +41,31 @@ pub trait PoseidonRefSpec<COM, const WIDTH: usize> {
 
         Self::product_mds(c, constants, state);
     }
+    fn full_round_2(
+        c: &mut COM,
+        constants: &PoseidonConstants<Self::ParameterField>,
+        constants_offset: &mut usize,
+        state: &mut [Self::Field; WIDTH],
+        _index: &mut usize,
+        _variable_number: &mut usize,
+        // perm: &mut Permutation,
+        _reuse_perm: bool,
+    ) {
+        panic!("full_round 2 in PoseidonRefSpec");
+        let pre_round_keys = constants
+            .round_constants
+            .iter()
+            .skip(*constants_offset)
+            .map(Some);
 
+        state.iter_mut().zip(pre_round_keys).for_each(|(l, pre)| {
+            *l = Self::quintic_s_box(c, l.clone(), pre.copied(), None);
+        });
+
+        *constants_offset += WIDTH;
+
+        Self::product_mds(&mut c, constants, state);
+    }
     fn partial_round(
         c: &mut COM,
         constants: &PoseidonConstants<Self::ParameterField>,
@@ -52,6 +79,26 @@ pub trait PoseidonRefSpec<COM, const WIDTH: usize> {
         // apply quintic s-box to the first element
         state[0] = Self::quintic_s_box(c, state[0].clone(), None, None);
 
+        // Multiply by MDS
+        Self::product_mds(c, constants, state);
+    }
+
+    fn partial_round_2(
+        c: &mut COM,
+        constants: &PoseidonConstants<Self::ParameterField>,
+        constants_offset: &mut usize,
+        state: &mut [Self::Field; WIDTH],
+        _index: &mut usize,
+        _variable_index: &mut usize,
+        // perm: &mut Permutation,
+        _reuse_perm: bool,
+    ) {
+        // TODO: we can combine add_round_constants and s_box using fewer
+        // constraints
+        Self::add_round_constants(c, state, constants, constants_offset);
+
+        // apply quintic s-box to the first element
+        state[0] = Self::quintic_s_box(c, state[0].clone(), None, None);
         // Multiply by MDS
         Self::product_mds(c, constants, state);
     }
@@ -115,6 +162,11 @@ pub trait PoseidonRefSpec<COM, const WIDTH: usize> {
     }
 
     fn alloc(c: &mut COM, v: Self::ParameterField) -> Self::Field;
+    fn alloc_2(
+        c: &mut COM,
+        v: Self::ParameterField,
+        gate_index: &mut usize,
+    ) -> Self::Field;
     fn zeros<const W: usize>(c: &mut COM) -> [Self::Field; W];
     fn zero(c: &mut COM) -> Self::Field {
         Self::zeros::<1>(c)[0].clone()
@@ -124,6 +176,15 @@ pub trait PoseidonRefSpec<COM, const WIDTH: usize> {
         c: &mut COM,
         a: &Self::Field,
         b: &Self::ParameterField,
+    ) -> Self::Field;
+    fn addi_2(
+        c: &mut COM,
+        a: &Self::Field,
+        b: &Self::ParameterField,
+        index: &mut usize,
+        variable_index: &mut usize,
+        // perm: &mut Permutation,
+        reuse_perm: bool,
     ) -> Self::Field;
     fn mul(c: &mut COM, x: &Self::Field, y: &Self::Field) -> Self::Field;
     fn muli(
@@ -238,6 +299,8 @@ impl<COM, S: PoseidonRefSpec<COM, WIDTH>, const WIDTH: usize>
     }
 }
 
+use ark_serialize::*;
+#[derive(CanonicalDeserialize, CanonicalSerialize)]
 pub struct NativeSpecRef<F: PrimeField> {
     _field: PhantomData<F>,
 }
@@ -251,7 +314,13 @@ impl<F: PrimeField, const WIDTH: usize> PoseidonRefSpec<(), WIDTH>
     fn alloc(_c: &mut (), v: Self::ParameterField) -> Self::Field {
         v
     }
-
+    fn alloc_2(
+        c: &mut (),
+        v: Self::ParameterField,
+        gate_index: &mut usize,
+    ) -> Self::Field {
+        unimplemented!()
+    }
     fn zeros<const W: usize>(_c: &mut ()) -> [Self::Field; W] {
         [F::zero(); W]
     }
@@ -268,6 +337,18 @@ impl<F: PrimeField, const WIDTH: usize> PoseidonRefSpec<(), WIDTH>
         *a + *b
     }
 
+    fn addi_2(
+        _c: &mut (),
+        a: &Self::Field,
+        b: &Self::ParameterField,
+        _index: &mut usize,
+        _variable_index: &mut usize,
+        // _perm: &mut Permutation,
+        _reuse_perm: bool,
+    ) -> Self::Field {
+        panic!("addi_2")
+    }
+
     fn mul(_c: &mut (), x: &Self::Field, y: &Self::Field) -> Self::Field {
         *x * *y
     }
@@ -280,7 +361,8 @@ impl<F: PrimeField, const WIDTH: usize> PoseidonRefSpec<(), WIDTH>
         *x * *y
     }
 }
-
+use ark_serialize::*;
+#[derive(CanonicalDeserialize, CanonicalSerialize)]
 pub struct PlonkSpecRef;
 
 impl<F, P, const WIDTH: usize>
@@ -297,6 +379,14 @@ where
         v: Self::ParameterField,
     ) -> Self::Field {
         c.add_input(v)
+    }
+
+    fn alloc_2(
+        c: &mut StandardComposer<F, P>,
+        v: Self::ParameterField,
+        gate_index: &mut usize,
+    ) -> Self::Field {
+        unimplemented!()
     }
 
     fn zeros<const W: usize>(
@@ -317,6 +407,23 @@ where
         c: &mut StandardComposer<F, P>,
         a: &Self::Field,
         b: &Self::ParameterField,
+    ) -> Self::Field {
+        let zero = c.zero_var();
+        c.arithmetic_gate(|g| {
+            g.witness(*a, zero, None)
+                .add(F::one(), F::zero())
+                .constant(*b)
+        })
+    }
+
+    fn addi_2(
+        c: &mut StandardComposer<F, P>,
+        a: &Self::Field,
+        b: &Self::ParameterField,
+        _index: &mut usize,
+        _variable_index: &mut usize,
+        // _perm: &mut Permutation,
+        _reuse_perm: bool,
     ) -> Self::Field {
         let zero = c.zero_var();
         c.arithmetic_gate(|g| {

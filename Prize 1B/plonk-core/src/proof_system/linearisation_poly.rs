@@ -295,7 +295,7 @@ where
         table_eval,
         table_next_eval,
     };
-
+    // todo
     let gate_constraints = compute_gate_constraint_satisfiability::<F, P>(
         range_separation_challenge,
         logic_separation_challenge,
@@ -327,6 +327,7 @@ where
         *lookup_separation_challenge,
     );
 
+    // todo
     let permutation = prover_key.permutation.compute_linearisation(
         n,
         *z_challenge,
@@ -337,6 +338,7 @@ where
         z_poly,
     )?;
 
+    //todo
     let quotient_term = &(&(&(&(&(&(&(&(&(&(&(&(&(&(t_8_poly
         * z_challenge_to_n)
         + t_7_poly)

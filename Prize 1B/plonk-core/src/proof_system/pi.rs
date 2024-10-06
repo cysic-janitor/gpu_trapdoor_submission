@@ -23,6 +23,11 @@ use ark_serialize::{
 use itertools::Itertools;
 
 use crate::prelude::Error;
+use ec_gpu_common::{
+    Fr as GpuFr, GPUSourceCore, GpuPolyContainer, MSMContext,
+    MsmPrecalcContainer, MultiexpKernel, PolyKernel, GPU_CUDA_CORES,
+};
+use crate::util::EvaluationDomainExt;
 
 ///  Public Inputs
 #[derive(CanonicalDeserialize, CanonicalSerialize, derivative::Derivative)]
@@ -109,11 +114,20 @@ where
 
     /// Returns the public inputs as a vector of `n` evaluations.
     /// The provided `n` must be a power of 2.
-    pub fn into_dense_poly(&self, n: usize) -> DensePolynomial<F> {
-        let domain = GeneralEvaluationDomain::<F>::new(n).unwrap();
-        let evals = self.as_evals(n);
-        DensePolynomial::from_coefficients_vec(domain.ifft(&evals))
-    }
+    // pub fn into_dense_poly(&self, 
+    //     kern: &PolyKernel<GpuFr>,
+    //     gpu_container: &mut GpuPolyContainer<GpuFr>,
+    //     n: usize) -> DensePolynomial<F> {
+    //     let domain = GeneralEvaluationDomain::<F>::new(n).unwrap();
+    //     let evals = self.as_evals(n);
+    //     let omega_inv = domain.group_gen_inv();
+    //     let size_inv = domain.size_inv();
+
+    //     let coeffs =  gpu_ifft(kern, gpu_container,&evals, "into_dense_poly", n, size_inv);
+        
+    //     // DensePolynomial::from_coefficients_vec(domain.ifft(&evals))
+    //     DensePolynomial::from_coefficients_vec(coeffs.to_vec())
+    // }
 
     /// Constructs [`PublicInputs`] from a positions and a values.
     ///
@@ -141,6 +155,10 @@ where
     /// Returns the non-zero PI values.
     pub fn get_vals(&self) -> impl Iterator<Item = &F> {
         self.values.values()
+    }
+
+    pub fn get_val(&self, pos: usize) -> Option<&F> {
+        self.values.get(&pos)
     }
 }
 

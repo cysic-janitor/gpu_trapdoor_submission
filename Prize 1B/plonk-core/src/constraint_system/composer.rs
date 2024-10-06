@@ -26,7 +26,9 @@ use core::cmp::max;
 use core::marker::PhantomData;
 use hashbrown::HashMap;
 use rand_core::{CryptoRng, RngCore};
+use std::sync::{Arc, Mutex};
 
+const VARIABLES_COUNT: usize = 3194695;
 /// The StandardComposer is the circuit-builder tool that the `plonk` repository
 /// provides to create, stored and transformed circuit descriptions
 /// into a [`Proof`](crate::proof_system::Proof) at some point.
@@ -52,6 +54,7 @@ use rand_core::{CryptoRng, RngCore};
 /// Each gate or group of gates adds a specific functionality or operation to
 /// the circuit description, and so, that's why we can understand
 /// the StandardComposer as a builder.
+
 #[derive(derivative::Derivative)]
 #[derivative(Debug)]
 pub struct StandardComposer<F, P>
@@ -60,71 +63,74 @@ where
     P: ModelParameters<BaseField = F>,
 {
     /// Number of arithmetic gates in the circuit
-    pub(crate) n: usize,
+    pub n: usize,
 
     // Selector vectors
     /// Multiplier selector
-    pub(crate) q_m: Vec<F>,
+    pub q_m: Vec<F>,
     /// Left wire selector
-    pub(crate) q_l: Vec<F>,
+    pub q_l: Vec<F>,
     /// Right wire selector
-    pub(crate) q_r: Vec<F>,
+    pub q_r: Vec<F>,
     /// Output wire selector
-    pub(crate) q_o: Vec<F>,
+    pub q_o: Vec<F>,
     /// Fourth wire selector
-    pub(crate) q_4: Vec<F>,
+    pub q_4: Vec<F>,
     /// Constant wire selector
-    pub(crate) q_c: Vec<F>,
+    pub q_c: Vec<F>,
     // Here we introduce 3 new selectors that will be useful for
     // poseidon hashes.
     /// Selector for for w_l^5
-    pub(crate) q_hl: Vec<F>,
+    pub q_hl: Vec<F>,
     /// Selector for for w_r^5
-    pub(crate) q_hr: Vec<F>,
+    pub q_hr: Vec<F>,
     /// Selector for for w_4^5
-    pub(crate) q_h4: Vec<F>,
+    pub q_h4: Vec<F>,
     /// Arithmetic wire selector
-    pub(crate) q_arith: Vec<F>,
+    pub q_arith: Vec<F>,
     /// Range selector
-    pub(crate) q_range: Vec<F>,
+    pub q_range: Vec<F>,
     /// Logic selector
-    pub(crate) q_logic: Vec<F>,
+    pub q_logic: Vec<F>,
     /// Fixed base group addition selector
-    pub(crate) q_fixed_group_add: Vec<F>,
+    pub q_fixed_group_add: Vec<F>,
     /// Variable base group addition selector
-    pub(crate) q_variable_group_add: Vec<F>,
+    pub q_variable_group_add: Vec<F>,
     /// Lookup gate selector
-    pub(crate) q_lookup: Vec<F>,
+    pub q_lookup: Vec<F>,
 
     /// Sparse representation of the Public Inputs linking the positions of the
     /// non-zero ones to it's actual values.
-    pub(crate) public_inputs: PublicInputs<F>,
-    pub(crate) intended_pi_pos: Vec<usize>,
+    pub public_inputs: PublicInputs<F>,
+    ///
+    pub intended_pi_pos: Vec<usize>,
 
     // Witness vectors
     /// Left wire witness vector.
-    pub(crate) w_l: Vec<Variable>,
+    pub w_l: Vec<Variable>,
     /// Right wire witness vector.
-    pub(crate) w_r: Vec<Variable>,
+    pub w_r: Vec<Variable>,
     /// Output wire witness vector.
-    pub(crate) w_o: Vec<Variable>,
+    pub w_o: Vec<Variable>,
     /// Fourth wire witness vector.
-    pub(crate) w_4: Vec<Variable>,
+    pub w_4: Vec<Variable>,
 
     /// Public lookup table
-    pub(crate) lookup_table: LookupTable<F>,
+    pub lookup_table: LookupTable<F>,
 
     /// A zero Variable that is a part of the circuit description.
     /// We reserve a variable to be zero in the system
     /// This is so that when a gate only uses three wires, we set the fourth
     /// wire to be the variable that references zero
-    pub(crate) zero_var: Variable,
+    pub zero_var: Variable,
 
     /// These are the actual variable values.
-    pub(crate) variables: HashMap<Variable, F>,
-
+    /// Number of variable in the circuit
+    pub variable_number: usize,
+    // pub variables: HashMap<Variable, F>,
+    pub variables_vec: Vec<F>,
     /// Permutation argument.
-    pub(crate) perm: Permutation,
+    pub perm: Permutation,
 
     /// Type Parameter Marker
     __: PhantomData<P>,
@@ -191,11 +197,40 @@ where
         Self::with_expected_size(0)
     }
 
+    ///
+    pub fn new_2(tree_height: u32) -> Self {
+        let expected_size = (usize::pow(2, tree_height - 1) - 1) * 193 + 4 + 1;
+
+        Self::with_expected_size_2(expected_size)
+    }
+
     /// Fixes a [`Variable`] in the witness to be a part of the circuit
     /// description.
     pub fn add_witness_to_circuit_description(&mut self, value: F) -> Variable {
         let var = self.add_input(value);
         self.constrain_to_constant(var, value, None);
+        var
+    }
+
+    ///
+    pub fn add_witness_to_circuit_description_2(
+        &mut self,
+        value: F,
+        index: &mut usize,
+    ) -> Variable {
+        let var = self.add_input(value);
+        self.constrain_to_constant_2(var, value, None, index);
+        var
+    }
+
+    pub fn add_witness_to_circuit_description_reuse_perm(
+        &mut self,
+        value: F,
+        index: &mut usize,
+    ) -> Variable {
+        let var = self.add_input_reuse_perm(value, index);
+        *index -= 1;
+        self.constrain_to_constant_reuse_perm(var, value, None, index);
         var
     }
 
@@ -229,9 +264,11 @@ where
             w_4: Vec::with_capacity(expected_size),
             lookup_table: LookupTable::new(),
             zero_var: Variable(0),
-            variables: HashMap::with_capacity(expected_size),
+            // variables: HashMap::with_capacity(0),
+            variables_vec: vec![F::zero(); 3194699],
             perm: Permutation::new(),
             __: PhantomData::<P>,
+            variable_number: 0,
         };
 
         // Reserve the first variable to be zero
@@ -240,10 +277,79 @@ where
 
         // Add dummy constraints
         composer.add_blinding_factors(&mut rand_core::OsRng);
-
         composer
     }
 
+    /// beginning of the composing stage.
+    pub fn with_expected_size_2(expected_size: usize) -> Self {
+        let mut composer = Self {
+            n: 0,
+            q_m: vec![F::zero(); expected_size],
+            q_l: vec![F::zero(); expected_size],
+            q_r: vec![F::zero(); expected_size],
+            q_o: vec![F::zero(); expected_size],
+            q_c: vec![F::zero(); expected_size],
+            q_4: vec![F::zero(); expected_size],
+            q_hl: vec![F::zero(); expected_size],
+            q_hr: vec![F::zero(); expected_size],
+            q_h4: vec![F::zero(); expected_size],
+            q_arith: vec![F::zero(); expected_size],
+            q_range: vec![F::zero(); expected_size],
+            q_logic: vec![F::zero(); expected_size],
+            q_fixed_group_add: vec![F::zero(); expected_size],
+            q_variable_group_add: vec![F::zero(); expected_size],
+            q_lookup: vec![F::zero(); expected_size],
+            public_inputs: PublicInputs::new(),
+            intended_pi_pos: Vec::new(),
+            w_l: vec![Variable::default(); expected_size],
+            w_r: vec![Variable::default(); expected_size],
+            w_o: vec![Variable::default(); expected_size],
+            w_4: vec![Variable::default(); expected_size],
+
+            lookup_table: LookupTable::new(),
+            zero_var: Variable(0),
+            // variables: HashMap::with_capacity(VARIABLES_COUNT),
+            variables_vec: vec![F::zero(); VARIABLES_COUNT],
+            perm: Permutation::new(),
+            variable_number: 0,
+            __: PhantomData::<P>,
+        };
+        let mut gate_index = 0;
+
+        // Reserve the first variable to be zero
+        composer.zero_var = composer
+            .add_witness_to_circuit_description_2(F::zero(), &mut gate_index);
+
+        // Add dummy constraints
+        composer.add_blinding_factors_2(&mut rand_core::OsRng, &mut gate_index);
+        composer
+    }
+
+    pub fn reset(&mut self, tree_height: u32) {
+        let expected_size = (usize::pow(2, tree_height - 1) - 1) * 193 + 4 + 1;
+
+        self.n = 0;
+
+        self.intended_pi_pos = Vec::new();
+        self.public_inputs = PublicInputs::new();
+        self.lookup_table = LookupTable::new();
+        self.zero_var = Variable(0);
+        // self.variables = HashMap::with_capacity(VARIABLES_COUNT);
+        self.variables_vec = vec![F::zero(); VARIABLES_COUNT];
+        self.variable_number = 0;
+
+        // self.perm = Permutation::new();
+        let mut index = 0;
+
+        // Reserve the first variable to be zero
+        self.zero_var = self.add_witness_to_circuit_description_reuse_perm(
+            F::zero(),
+            &mut index,
+        );
+
+        // Add dummy constraints
+        self.add_blinding_factors_reuse_perm(&mut rand_core::OsRng, &mut index);
+    }
     /// Witness representation of zero of the first variable of any circuit
     pub fn zero_var(&self) -> Variable {
         self.zero_var
@@ -259,11 +365,96 @@ where
         let var = self.perm.new_variable();
         // The composer now links the Variable returned from
         // the Permutation to the value F.
-        self.variables.insert(var, s);
+        self.variables_vec.as_mut_slice()[var.0] = s;
+
+        // self.variables.insert(var, s);
+        self.variable_number += 1;
+        var
+    }
+
+    pub fn add_input_end(
+        &mut self,
+        s: F,
+        variable_index: &mut usize,
+        perm: Option<&mut Permutation>,
+        reuse_perm: bool,
+    ) -> Variable {
+        // Get a new Variable from the permutation
+        let var = if !reuse_perm {
+            let var = {
+                if let Some(perm) = perm {
+                    let var = perm.new_variable_2(variable_index);
+                    var
+                } else {
+                    let var = self.perm.new_variable_2(variable_index);
+                    var
+                }
+            };
+
+            self.variables_vec.as_mut_slice()[var.0] = s;
+            var
+        } else {
+            let var = Variable(*variable_index);
+            *variable_index += 1;
+
+            // The composer now links the Variable returned from
+            // // the Permutation to the value F.
+            // self.variables_vec.as_mut_slice()[var.0] = s;
+            // self.variables.lock().unwrap().insert(var, s);
+            var
+        };
 
         var
     }
 
+    ///
+    pub fn add_input_2(
+        &mut self,
+        s: F,
+        variable_index: &mut usize,
+        // perm: Option<&mut Permutation>,
+        reuse_perm: bool,
+    ) -> Variable {
+        // Get a new Variable from the permutation
+        let var = {
+            //     let var = {
+            //         if let Some(perm) = perm {
+            //             let var = perm.new_variable_2(variable_index);
+            //             var
+            //         } else {
+            //             let var = self.perm.new_variable_2(variable_index);
+            //             var
+            //         }
+            //     };
+            //     var
+            // } else {
+            let var = Variable(*variable_index);
+            *variable_index += 1;
+            var
+        };
+
+        // The composer now links the Variable returned from
+        // the Permutation to the value F.
+        self.variables_vec.as_mut_slice()[var.0] = s;
+
+        // self.variables.lock().unwrap().insert(var, s);
+        var
+    }
+
+    pub fn add_input_reuse_perm(
+        &mut self,
+        s: F,
+        variable_index: &mut usize,
+    ) -> Variable {
+        let var = Variable(*variable_index);
+        // the Permutation to the value F.
+        self.variables_vec.as_mut_slice()[var.0] = s;
+        // self.variables.insert(var, s);
+        self.variable_number += 1;
+
+        *variable_index += 1;
+        var
+    }
     /// Adds a width-3 poly gate.
     /// This gate gives total freedom to the end user to implement the
     /// corresponding circuits in the most optimized way possible because
@@ -323,6 +514,168 @@ where
         (a, b, c)
     }
 
+    ///
+    pub fn poly_gate_2(
+        &mut self,
+        a: Variable,
+        b: Variable,
+        c: Variable,
+        q_m: F,
+        q_l: F,
+        q_r: F,
+        q_o: F,
+        q_c: F,
+        pi: Option<F>,
+        gate_index: &mut usize,
+        // perm: Option<&mut Permutation>,
+        reuse_perm: bool,
+    ) -> (Variable, Variable, Variable) {
+        // self.w_l.push(a);
+        // println!("index:{}", *index);
+        self.w_l[*gate_index] = a;
+        // self.w_r.push(b);
+        self.w_r[*gate_index] = b;
+        // self.w_o.push(c);
+        self.w_o[*gate_index] = c;
+
+        // self.w_4.push(self.zero_var);
+        self.w_4[*gate_index] = self.zero_var;
+        // self.q_l.push(q_l);
+        self.q_l[*gate_index] = q_l;
+        // self.q_r.push(q_r);
+        self.q_r[*gate_index] = q_r;
+
+        // Add selector vectors
+        // self.q_m.push(q_m);
+        self.q_m[*gate_index] = q_m;
+        // self.q_o.push(q_o);
+        self.q_o[*gate_index] = q_o;
+        // self.q_c.push(q_c);
+        self.q_c[*gate_index] = q_c;
+        // self.q_4.push(F::zero());
+        self.q_4[*gate_index] = F::zero();
+
+        // self.q_arith.push(F::one());
+        self.q_arith[*gate_index] = F::one();
+        // self.q_range.push(F::zero());
+        self.q_range[*gate_index] = F::zero();
+        // self.q_logic.push(F::zero());
+        self.q_logic[*gate_index] = F::zero();
+        // self.q_fixed_group_add.push(F::zero());
+        self.q_fixed_group_add[*gate_index] = F::zero();
+        // self.q_variable_group_add.push(F::zero());
+        self.q_variable_group_add[*gate_index] = F::zero();
+        // self.q_lookup.push(F::zero());
+        self.q_lookup[*gate_index] = F::zero();
+
+        // add high degree selectors
+        // self.q_hl.push(F::zero());
+        self.q_hl[*gate_index] = F::zero();
+        // self.q_hr.push(F::zero());
+        self.q_hr[*gate_index] = F::zero();
+        // self.q_h4.push(F::zero());
+        self.q_h4[*gate_index] = F::zero();
+
+        if let Some(pi) = pi {
+            self.add_pi(*gate_index, &pi).unwrap_or_else(|_| {
+                panic!("Could not insert PI {:?} at {}", pi, *gate_index)
+            });
+        };
+
+        // if !reuse_perm {
+        //     if let Some(perm) = perm {
+        //         perm.add_variables_to_map(a, b, c, self.zero_var,
+        // *gate_index);     } else {
+        //         self.perm.add_variables_to_map(
+        //             a,
+        //             b,
+        //             c,
+        //             self.zero_var,
+        //             *gate_index,
+        //         );
+        //     }
+        // }
+        *gate_index += 1;
+        self.n = *gate_index;
+        (a, b, c)
+    }
+
+    pub fn poly_gate_reuse_perm(
+        &mut self,
+        a: Variable,
+        b: Variable,
+        c: Variable,
+        q_m: F,
+        q_l: F,
+        q_r: F,
+        q_o: F,
+        q_c: F,
+        pi: Option<F>,
+        index: &mut usize,
+    ) -> (Variable, Variable, Variable) {
+        // self.w_l.push(a);
+        // println!("index:{}", *index);
+        self.w_l[*index] = a;
+        // self.w_r.push(b);
+        self.w_r[*index] = b;
+        // self.w_o.push(c);
+        self.w_o[*index] = c;
+
+        // self.w_4.push(self.zero_var);
+        self.w_4[*index] = self.zero_var;
+        // self.q_l.push(q_l);
+        self.q_l[*index] = q_l;
+        // self.q_r.push(q_r);
+        self.q_r[*index] = q_r;
+
+        // Add selector vectors
+        // self.q_m.push(q_m);
+        self.q_m[*index] = q_m;
+        // self.q_o.push(q_o);
+        self.q_o[*index] = q_o;
+        // self.q_c.push(q_c);
+        self.q_c[*index] = q_c;
+        // self.q_4.push(F::zero());
+        self.q_4[*index] = F::zero();
+
+        // self.q_arith.push(F::one());
+        self.q_arith[*index] = F::one();
+        // self.q_range.push(F::zero());
+        self.q_range[*index] = F::zero();
+        // self.q_logic.push(F::zero());
+        self.q_logic[*index] = F::zero();
+        // self.q_fixed_group_add.push(F::zero());
+        self.q_fixed_group_add[*index] = F::zero();
+        // self.q_variable_group_add.push(F::zero());
+        self.q_variable_group_add[*index] = F::zero();
+        // self.q_lookup.push(F::zero());
+        self.q_lookup[*index] = F::zero();
+
+        // add high degree selectors
+        // self.q_hl.push(F::zero());
+        self.q_hl[*index] = F::zero();
+        // self.q_hr.push(F::zero());
+        self.q_hr[*index] = F::zero();
+        // self.q_h4.push(F::zero());
+        self.q_h4[*index] = F::zero();
+
+        if let Some(pi) = pi {
+            self.add_pi(*index, &pi).unwrap_or_else(|_| {
+                panic!("Could not insert PI {:?} at {}", pi, *index)
+            });
+        };
+
+        // if let Some(perm) = perm {
+        //     perm.add_variables_to_map(a, b, c, self.zero_var, *index);
+        // } else {
+        //     self.perm
+        //         .add_variables_to_map(a, b, c, self.zero_var, *index);
+        // }
+        *index += 1;
+        self.n = *index;
+        (a, b, c)
+    }
+
     /// Constrain a [`Variable`] to be equal to
     /// a specific constant value which is part of the circuit description and
     /// **NOT** a Public Input. ie. this value will be the same for all of the
@@ -345,6 +698,50 @@ where
             pi,
         );
     }
+    ///
+    pub fn constrain_to_constant_2(
+        &mut self,
+        a: Variable,
+        constant: F,
+        pi: Option<F>,
+        index: &mut usize,
+    ) {
+        self.poly_gate_2(
+            a,
+            a,
+            a,
+            F::zero(),
+            F::one(),
+            F::zero(),
+            F::zero(),
+            -constant,
+            pi,
+            index,
+            // None,
+            false,
+        );
+    }
+
+    pub fn constrain_to_constant_reuse_perm(
+        &mut self,
+        a: Variable,
+        constant: F,
+        pi: Option<F>,
+        index: &mut usize,
+    ) {
+        self.poly_gate_reuse_perm(
+            a,
+            a,
+            a,
+            F::zero(),
+            F::one(),
+            F::zero(),
+            F::zero(),
+            -constant,
+            pi,
+            index,
+        );
+    }
 
     /// Add a constraint into the circuit description that states that two
     /// [`Variable`]s are equal.
@@ -362,12 +759,43 @@ where
         );
     }
 
+    /// [`Variable`]s are equal.
+    pub fn assert_equal_2(
+        &mut self,
+        a: Variable,
+        b: Variable,
+        index: &mut usize,
+        // perm: &mut Permutation,
+        reuse_perm: bool,
+    ) {
+        self.poly_gate_2(
+            a,
+            b,
+            self.zero_var,
+            F::zero(),
+            F::one(),
+            -F::one(),
+            F::zero(),
+            F::zero(),
+            None,
+            index,
+            // Some(perm),
+            reuse_perm,
+        );
+    }
+
     /// A gate which outputs a variable whose value is 1 if
     /// the input is 0 and whose value is 0 otherwise
     pub fn is_zero_with_output(&mut self, a: Variable) -> Variable {
         // Get relevant field values
-        let a_value = self.variables.get(&a).unwrap();
-        let y_value = a_value.inverse().unwrap_or_else(F::one);
+
+        let (a_value, y_value) = {
+            let variables = &self.variables_vec;
+            let a_value = variables.get(a.0).unwrap();
+            let y_value = a_value.inverse().unwrap_or_else(F::one);
+
+            (&a_value.clone(), y_value)
+        };
 
         // This has value 1 if input value is zero, value 0 otherwise
         let b_value = F::one() - *a_value * y_value;
@@ -478,9 +906,14 @@ where
         bit: Variable,
         value: Variable,
     ) -> Variable {
-        let value_scalar = self.variables.get(&value).unwrap();
-        let bit_scalar = self.variables.get(&bit).unwrap();
+        let (value_scalar, bit_scalar) = {
+            let v = &self.variables_vec;
+            let value_scalar = v.get(value.0).unwrap();
+            let bit_scalar = v.get(bit.0).unwrap();
+            (value_scalar.clone(), bit_scalar.clone())
+        };
 
+        let (value_scalar, bit_scalar) = (&value_scalar, &bit_scalar);
         let f_x_scalar = F::one() - bit_scalar + (*bit_scalar * value_scalar);
         let f_x = self.add_input(f_x_scalar);
 
@@ -610,6 +1043,11 @@ where
             let rand_var_3 = self.add_input(F::rand(rng));
             let rand_var_4 = self.add_input(F::rand(rng));
 
+            // rand_var_1 = self.add_input(F::one());
+            // rand_var_2 = self.add_input(F::one());
+            // let rand_var_3 = self.add_input(F::one());
+            // let rand_var_4 = self.add_input(F::one());
+
             self.w_l.push(rand_var_1);
             self.w_r.push(rand_var_2);
             self.w_o.push(rand_var_3);
@@ -674,6 +1112,276 @@ where
         );
         self.n += 1;
     }
+
+    ///
+    pub fn add_blinding_factors_2<R>(
+        &mut self,
+        rng: &mut R,
+        gate_index: &mut usize,
+    ) where
+        R: CryptoRng + RngCore + ?Sized,
+    {
+        let mut rand_var_1 = self.zero_var();
+        let mut rand_var_2 = self.zero_var();
+        // Blinding wires
+        for _ in 0..2 {
+            // rand_var_1 = self.add_input(F::one());
+            // rand_var_2 = self.add_input(F::one());
+            // let rand_var_3 = self.add_input(F::one());
+            // let rand_var_4 = self.add_input(F::one());
+            rand_var_1 = self.add_input(F::rand(rng));
+            rand_var_2 = self.add_input(F::rand(rng));
+            let rand_var_3 = self.add_input(F::rand(rng));
+            let rand_var_4 = self.add_input(F::rand(rng));
+
+            // self.w_l.push(rand_var_1);
+            self.w_l[*gate_index] = rand_var_1;
+            // self.w_r.push(rand_var_2);
+            self.w_r[*gate_index] = rand_var_2;
+            // self.w_o.push(rand_var_3);
+            self.w_o[*gate_index] = rand_var_3;
+            // self.w_4.push(rand_var_4);
+            self.w_4[*gate_index] = rand_var_4;
+
+            // All selectors fixed to 0 so that the constraints are satisfied
+            // self.q_m.push(F::zero());
+            self.q_m[*gate_index] = F::zero();
+            // self.q_l.push(F::zero());
+            self.q_l[*gate_index] = F::zero();
+            // self.q_r.push(F::zero());
+            self.q_r[*gate_index] = F::zero();
+            // self.q_o.push(F::zero());
+            self.q_o[*gate_index] = F::zero();
+            // self.q_c.push(F::zero());
+            self.q_c[*gate_index] = F::zero();
+            // self.q_4.push(F::zero());
+            self.q_4[*gate_index] = F::zero();
+            // self.q_arith.push(F::zero());
+            self.q_arith[*gate_index] = F::zero();
+            // self.q_range.push(F::zero());
+            self.q_range[*gate_index] = F::zero();
+            // self.q_logic.push(F::zero());
+            self.q_logic[*gate_index] = F::zero();
+            // self.q_fixed_group_add.push(F::zero());
+            self.q_fixed_group_add[*gate_index] = F::zero();
+            // self.q_variable_group_add.push(F::zero());
+            self.q_variable_group_add[*gate_index] = F::zero();
+            // self.q_lookup.push(F::zero());
+            self.q_lookup[*gate_index] = F::zero();
+            // add high degree selectors
+            // self.q_hl.push(F::zero());
+            self.q_hl[*gate_index] = F::zero();
+            // self.q_hr.push(F::zero());
+            self.q_hr[*gate_index] = F::zero();
+            // self.q_h4.push(F::zero());
+            self.q_h4[*gate_index] = F::zero();
+
+            self.perm.add_variables_to_map(
+                rand_var_1,
+                rand_var_2,
+                rand_var_3,
+                rand_var_4,
+                *gate_index,
+            );
+            // self.n += 1;
+            *gate_index += 1;
+            self.n = *gate_index;
+        }
+
+        // Blinding Z
+        // We add 2 pairs of equal random points
+
+        // self.w_l.push(rand_var_1);
+        self.w_l[*gate_index] = rand_var_1;
+        // self.w_r.push(rand_var_2);
+        self.w_r[*gate_index] = rand_var_2;
+        // self.w_o.push(self.zero_var());
+        self.w_o[*gate_index] = self.zero_var();
+        // self.w_4.push(self.zero_var());
+        self.w_4[*gate_index] = self.zero_var();
+
+        // All selectors fixed to 0 so that the constraints are satisfied
+        // self.q_m.push(F::zero());
+        self.q_m[*gate_index] = F::zero();
+        // self.q_l.push(F::zero());
+        self.q_l[*gate_index] = F::zero();
+        // self.q_r.push(F::zero());
+        self.q_r[*gate_index] = F::zero();
+        // self.q_o.push(F::zero());
+        self.q_o[*gate_index] = F::zero();
+        // self.q_c.push(F::zero());
+        self.q_c[*gate_index] = F::zero();
+        // self.q_4.push(F::zero());
+        self.q_4[*gate_index] = F::zero();
+        // self.q_arith.push(F::zero());
+        self.q_arith[*gate_index] = F::zero();
+        // self.q_range.push(F::zero());
+        self.q_range[*gate_index] = F::zero();
+        // self.q_logic.push(F::zero());
+        self.q_logic[*gate_index] = F::zero();
+        // self.q_fixed_group_add.push(F::zero());
+        self.q_fixed_group_add[*gate_index] = F::zero();
+        // self.q_variable_group_add.push(F::zero());
+        self.q_variable_group_add[*gate_index] = F::zero();
+        // self.q_lookup.push(F::zero());
+        self.q_lookup[*gate_index] = F::zero();
+
+        // add high degree selectors
+        // self.q_hl.push(F::zero());
+        self.q_hl[*gate_index] = F::zero();
+        // self.q_hr.push(F::zero());
+        self.q_hr[*gate_index] = F::zero();
+        // self.q_h4.push(F::zero());
+        self.q_h4[*gate_index] = F::zero();
+
+        self.perm.add_variables_to_map(
+            rand_var_1,
+            rand_var_2,
+            self.zero_var(),
+            self.zero_var(),
+            *gate_index,
+        );
+        *gate_index += 1;
+        self.n = *gate_index;
+    }
+
+    pub fn add_blinding_factors_reuse_perm<R>(
+        &mut self,
+        rng: &mut R,
+        index: &mut usize,
+    ) where
+        R: CryptoRng + RngCore + ?Sized,
+    {
+        let mut rand_var_1 = self.zero_var();
+        let mut rand_var_2 = self.zero_var();
+        let mut variable_index = *index;
+        // Blinding wires
+        for _ in 0..2 {
+            rand_var_1 =
+                self.add_input_reuse_perm(F::rand(rng), &mut variable_index);
+            rand_var_2 =
+                self.add_input_reuse_perm(F::rand(rng), &mut variable_index);
+            let rand_var_3 =
+                self.add_input_reuse_perm(F::rand(rng), &mut variable_index);
+            let rand_var_4 =
+                self.add_input_reuse_perm(F::rand(rng), &mut variable_index);
+
+            // rand_var_1 =
+            //     self.add_input_reuse_perm(F::one(), &mut variable_index);
+            // rand_var_2 =
+            //     self.add_input_reuse_perm(F::one(), &mut variable_index);
+            // let rand_var_3 =
+            //     self.add_input_reuse_perm(F::one(), &mut variable_index);
+            // let rand_var_4 =
+            //     self.add_input_reuse_perm(F::one(), &mut variable_index);
+
+            // self.w_l.push(rand_var_1);
+            self.w_l[*index] = rand_var_1;
+            // self.w_r.push(rand_var_2);
+            self.w_r[*index] = rand_var_2;
+            // self.w_o.push(rand_var_3);
+            self.w_o[*index] = rand_var_3;
+            // self.w_4.push(rand_var_4);
+            self.w_4[*index] = rand_var_4;
+
+            // All selectors fixed to 0 so that the constraints are satisfied
+            // self.q_m.push(F::zero());
+            self.q_m[*index] = F::zero();
+            // self.q_l.push(F::zero());
+            self.q_l[*index] = F::zero();
+            // self.q_r.push(F::zero());
+            self.q_r[*index] = F::zero();
+            // self.q_o.push(F::zero());
+            self.q_o[*index] = F::zero();
+            // self.q_c.push(F::zero());
+            self.q_c[*index] = F::zero();
+            // self.q_4.push(F::zero());
+            self.q_4[*index] = F::zero();
+            // self.q_arith.push(F::zero());
+            self.q_arith[*index] = F::zero();
+            // self.q_range.push(F::zero());
+            self.q_range[*index] = F::zero();
+            // self.q_logic.push(F::zero());
+            self.q_logic[*index] = F::zero();
+            // self.q_fixed_group_add.push(F::zero());
+            self.q_fixed_group_add[*index] = F::zero();
+            // self.q_variable_group_add.push(F::zero());
+            self.q_variable_group_add[*index] = F::zero();
+            // self.q_lookup.push(F::zero());
+            self.q_lookup[*index] = F::zero();
+            // add high degree selectors
+            // self.q_hl.push(F::zero());
+            self.q_hl[*index] = F::zero();
+            // self.q_hr.push(F::zero());
+            self.q_hr[*index] = F::zero();
+            // self.q_h4.push(F::zero());
+            self.q_h4[*index] = F::zero();
+
+            // self.perm.add_variables_to_map(
+            //     rand_var_1, rand_var_2, rand_var_3, rand_var_4, *index,
+            // );
+            // self.n += 1;
+            *index += 1;
+            self.n = *index;
+        }
+
+        // Blinding Z
+        // We add 2 pairs of equal random points
+
+        // self.w_l.push(rand_var_1);
+        self.w_l[*index] = rand_var_1;
+        // self.w_r.push(rand_var_2);
+        self.w_r[*index] = rand_var_2;
+        // self.w_o.push(self.zero_var());
+        self.w_o[*index] = self.zero_var();
+        // self.w_4.push(self.zero_var());
+        self.w_4[*index] = self.zero_var();
+
+        // All selectors fixed to 0 so that the constraints are satisfied
+        // self.q_m.push(F::zero());
+        self.q_m[*index] = F::zero();
+        // self.q_l.push(F::zero());
+        self.q_l[*index] = F::zero();
+        // self.q_r.push(F::zero());
+        self.q_r[*index] = F::zero();
+        // self.q_o.push(F::zero());
+        self.q_o[*index] = F::zero();
+        // self.q_c.push(F::zero());
+        self.q_c[*index] = F::zero();
+        // self.q_4.push(F::zero());
+        self.q_4[*index] = F::zero();
+        // self.q_arith.push(F::zero());
+        self.q_arith[*index] = F::zero();
+        // self.q_range.push(F::zero());
+        self.q_range[*index] = F::zero();
+        // self.q_logic.push(F::zero());
+        self.q_logic[*index] = F::zero();
+        // self.q_fixed_group_add.push(F::zero());
+        self.q_fixed_group_add[*index] = F::zero();
+        // self.q_variable_group_add.push(F::zero());
+        self.q_variable_group_add[*index] = F::zero();
+        // self.q_lookup.push(F::zero());
+        self.q_lookup[*index] = F::zero();
+
+        // add high degree selectors
+        // self.q_hl.push(F::zero());
+        self.q_hl[*index] = F::zero();
+        // self.q_hr.push(F::zero());
+        self.q_hr[*index] = F::zero();
+        // self.q_h4.push(F::zero());
+        self.q_h4[*index] = F::zero();
+
+        // self.perm.add_variables_to_map(
+        //     rand_var_1,
+        //     rand_var_2,
+        //     self.zero_var(),
+        //     self.zero_var(),
+        //     *index,
+        // );
+        *index += 1;
+        self.n = *index;
+    }
+
     /// Utility function that checks on the "front-end"
     /// side of the PLONK implementation if the identity polynomial
     /// is satisfied for each of the [`StandardComposer`]'s gates.
@@ -690,25 +1398,27 @@ where
         use ark_ff::BigInteger;
 
         use crate::constraint_system::SBOX_ALPHA;
+        let v = &self.variables_vec;
+
         let w_l: Vec<&F> = self
             .w_l
             .iter()
-            .map(|w_l_i| self.variables.get(w_l_i).unwrap())
+            .map(|w_l_i| v.get(w_l_i.0).unwrap())
             .collect();
         let w_r: Vec<&F> = self
             .w_r
             .iter()
-            .map(|w_r_i| self.variables.get(w_r_i).unwrap())
+            .map(|w_r_i| v.get(w_r_i.0).unwrap())
             .collect();
         let w_o: Vec<&F> = self
             .w_o
             .iter()
-            .map(|w_o_i| self.variables.get(w_o_i).unwrap())
+            .map(|w_o_i| v.get(w_o_i.0).unwrap())
             .collect();
         let w_4: Vec<&F> = self
             .w_4
             .iter()
-            .map(|w_4_i| self.variables.get(w_4_i).unwrap())
+            .map(|w_4_i| v.get(w_4_i.0).unwrap())
             .collect();
         // Computes f(f-1)(f-2)(f-3)
         let delta = |f: F| -> F {
@@ -862,11 +1572,16 @@ where
     /// [`is_eq_with_output`](StandardComposer::is_eq_with_output)
     /// or other similar method that returns a `Variable`.
     #[inline]
+    // pub fn value_of_var(&self, var: Variable) -> F {
+    //     self.variables
+    //         .lock()
+    //         .unwrap()
+    //         .get(&var)
+    //         .copied()
+    //         .expect("the variable does not exist")
+    // }
     pub fn value_of_var(&self, var: Variable) -> F {
-        self.variables
-            .get(&var)
-            .copied()
-            .expect("the variable does not exist")
+        self.variables_vec[var.0]
     }
 }
 

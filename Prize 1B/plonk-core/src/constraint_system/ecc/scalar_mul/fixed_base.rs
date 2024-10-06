@@ -13,8 +13,9 @@ use ark_ec::models::twisted_edwards_extended::{
     GroupAffine as TEGroupAffine, GroupProjective as TEGroupProjective,
 };
 use ark_ec::{models::TEModelParameters, ProjectiveCurve};
-use ark_ff::{BigInteger, FpParameters, PrimeField};
 use num_traits::Zero;
+use ark_ff::{ FpParameters, PrimeField};
+use ark_ff::BigInteger;
 
 fn compute_wnaf_point_multiples<P>(
     base_point: TEGroupProjective<P>,
@@ -59,7 +60,9 @@ where
             compute_wnaf_point_multiples(base_point.into());
         point_multiples.reverse();
 
-        let scalar_value = self.variables.get(&scalar).unwrap();
+        let scalar_value = {
+            self.variables_vec.get(scalar.0).unwrap().clone()
+        };
 
         // Convert scalar to wnaf_2(k)
         let wnaf_entries =
